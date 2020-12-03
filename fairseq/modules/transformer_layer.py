@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from fairseq import utils
 from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
@@ -64,7 +66,37 @@ class TransformerEncoderLayer(nn.Module):
         )
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
-
+        
+        # START YOUR CODE
+        phrase_hidden_dim = args.parse_hidden_dim
+        self.w1_phrase_proj = self.build_attentive_phrase_proj(
+            self.embed_dim * 2,
+            phrase_hidden_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.w2_phrase_proj = self.build_attentive_phrase_proj(
+            phrase_hidden_dim,
+            self.embed_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.phrase_attn = self.build_phrase_attention(self.embed_dim, args)
+        self.w3_phrase_proj = self.build_attentive_phrase_proj(
+            self.embed_dim * 2,
+            phrase_hidden_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.w4_phrase_proj = self.build_attentive_phrase_proj(
+            phrase_hidden_dim,
+            self.embed_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        
+        # END YOUR CODE
+        
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
@@ -85,6 +117,35 @@ class TransformerEncoderLayer(nn.Module):
             qn_block_size=self.quant_noise_block_size,
         )
 
+    # START YOUR CODE
+    def build_attentive_phrase_proj(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(
+            nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
+        )
+    def build_phrase_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.encoder_attention_heads,
+            kdim=self.embed_dim,
+            vdim=self.embed_dim,
+            dropout=args.attention_dropout,
+            self_attention=False,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+    def attentive_phrase_representation(self, x_phrase):
+        n_tok = x_phrase.shape[2]
+        Re_all = x_phrase.mean(axis=2) #(batch_size, total_phrase, n_tok, embed_size)
+        score = self.w2_phrase_proj(
+                torch.sigmoid(self.w1_phrase_proj(torch.cat(
+                        (x_phrase, Re_all.unsqueeze(2).expand((-1,-1,n_tok,-1))), dim=-1))))
+        #(batch_size, total_phrase, n_tok, embed_size)
+        score = F.softmax(score, dim=2) #(batch_size, total_phrase, n_tok, embed_size)
+        phrase_embed = (x_phrase * score).sum(2) #(batch_size, total_phrase, embed_size)
+        phrase_embed = phrase_embed.transpose(0, 1) # B x T x C => T x B x C
+        return phrase_embed
+    
+    # END YOUR CODE
     def residual_connection(self, x, residual):
         return residual + x
 
@@ -102,7 +163,7 @@ class TransformerEncoderLayer(nn.Module):
                     state_dict["{}.{}.{}".format(name, new, m)] = state_dict[k]
                     del state_dict[k]
 
-    def forward(self, x, encoder_padding_mask, attn_mask: Optional[Tensor] = None):
+    def forward(self, x, encoder_padding_mask, x_phrase, attn_mask: Optional[Tensor] = None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -127,8 +188,29 @@ class TransformerEncoderLayer(nn.Module):
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
 
         residual = x
+        phrase_residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
+            x_phrase = self.self_attn_layer_norm(x_phrase)
+        # START YOUR CODE
+        x_phrase = self.attentive_phrase_representation(x_phrase)
+        attentive_phrase = x_phrase # to do Transparent Attentive
+        
+        x_out, _ = self.phrase_attn(
+                query=x, 
+                key=x_phrase, 
+                value=x_phrase)
+        x_out = self.dropout_module(x_out)
+        x_out = self.residual_connection(x_out, phrase_residual)
+        
+        x = self.w4_phrase_proj(torch.sigmoid(
+                self.w3_phrase_proj(torch.cat((x, x_out), dim=-1))))
+        
+        #residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+        # END YOUR CODE
+        
         x, _ = self.self_attn(
             query=x,
             key=x,
@@ -151,7 +233,7 @@ class TransformerEncoderLayer(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-        return x
+        return x, attentive_phrase
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -235,6 +317,27 @@ class TransformerDecoderLayer(nn.Module):
         self.need_attn = True
 
         self.onnx_trace = False
+        # START YOUR CODE
+        phrase_hidden_dim = args.parse_hidden_dim
+        self.encoder_embed_dim = args.encoder_embed_dim
+        
+        self.W_transparent = nn.Parameter(torch.Tensor(args.encoder_layers, 1))
+        nn.init.xavier_uniform_(self.W_transparent)
+        
+        self.phrase_attn = self.build_phrase_attention(self.embed_dim, args)
+        self.w1_phrase_proj = self.build_attentive_phrase_proj(
+            self.embed_dim * 2,
+            phrase_hidden_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.w2_phrase_proj = self.build_attentive_phrase_proj(
+            phrase_hidden_dim,
+            self.embed_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        # END YOUR CODE
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
@@ -267,7 +370,23 @@ class TransformerDecoderLayer(nn.Module):
             q_noise=self.quant_noise,
             qn_block_size=self.quant_noise_block_size,
         )
-
+    # START YOUR CODE
+    def build_phrase_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.decoder_attention_heads,
+            kdim=self.encoder_embed_dim,
+            vdim=self.encoder_embed_dim,
+            dropout=args.attention_dropout,
+            encoder_decoder_attention=True,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+    def build_attentive_phrase_proj(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(
+            nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
+        )
+    # END YOUR CODE
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
 
@@ -286,6 +405,7 @@ class TransformerDecoderLayer(nn.Module):
         self_attn_padding_mask: Optional[torch.Tensor] = None,
         need_attn: bool = False,
         need_head_weights: bool = False,
+        encoder_phrase_attentive: Optional[torch.Tensor] = None
     ):
         """
         Args:
@@ -304,6 +424,31 @@ class TransformerDecoderLayer(nn.Module):
             need_attn = True
 
         residual = x
+        
+        # START YOUR CODE
+        phrase_residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+            encoder_phrase_attentive = self.self_attn_layer_norm(encoder_phrase_attentive)
+        
+        score = F.softmax(self.W_transparent, dim=0)
+        encoder_layer, bz, total_phrase, embed_size = encoder_phrase_attentive.shape
+        encoder_phrase_attentive = torch.matmul(score.T, encoder_phrase_attentive.reshape(encoder_layer,-1))\
+                                    .reshape(bz, total_phrase, embed_size)
+                        
+        x_out, _ = self.phrase_attn(
+                query=x, 
+                key=encoder_phrase_attentive, 
+                value=encoder_phrase_attentive)
+        x_out = self.dropout_module(x_out)
+        x_out = self.residual_connection(x_out, phrase_residual)
+        
+        x = self.w2_phrase_proj(torch.sigmoid(
+                self.w1_phrase_proj(torch.cat((x, x_out), dim=-1))))
+        
+        # END YOUR CODE
+        
+        
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
         if prev_self_attn_state is not None:
@@ -352,9 +497,11 @@ class TransformerDecoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
+        
+
+        
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
-
         if self.encoder_attn is not None and encoder_out is not None:
             residual = x
             if self.normalize_before:
@@ -369,7 +516,8 @@ class TransformerDecoderLayer(nn.Module):
                     saved_state["prev_key_padding_mask"] = prev_attn_state[2]
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
-
+            
+            
             x, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,
