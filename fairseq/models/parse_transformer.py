@@ -390,11 +390,48 @@ class TransformerEncoder(FairseqEncoder):
       x_phrase = x_phrase.reshape((batch_size, -1, ntok))
       return x_phrase
     
+    def ngram_stride(self, x):
+        batch_size, seql = x.shape
+        ntok = max(3, min(8, seql//6))
+        stride = ntok // 3
+        a = seql - stride
+        b = ntok - stride
+        pad_len = (b - a % b) % b
+        n_loop = (seql + pad_len - stride) // (ntok - stride)
+        assert (seql + pad_len - stride) % (ntok - stride) == 0
+        
+        padding = torch.tensor(self.padding_idx, device=x.device).repeat(batch_size, pad_len)
+        x = torch.cat([x,padding],dim=-1)
+        
+        ngram = None
+        start_idx = 0
+        for _ in range(n_loop):
+          if ngram == None:
+            ngram = x[:,start_idx:start_idx + ntok].unsqueeze(1)
+          else:
+            ngram = torch.cat([ngram, x[:,start_idx:start_idx + ntok].unsqueeze(1)], dim=1)
+          start_idx += ntok - stride
+        assert torch.Size([batch_size, n_loop, ntok]) == ngram.shape
+        
+        ngram = ngram.to(x.device)
+        return ngram
     # END YOUR CODE
     def forward_embedding(
         self, src_tokens, token_embedding: Optional[torch.Tensor] = None
     ):
         # embed tokens and positions
+        #START YOUR CODE
+        batch_size, seq_len = src_tokens.shape
+        ntok = max(3,min(seq_len//6, 8))
+        
+        if seq_len % ntok != 0:
+            pad_len = (seq_len // ntok + 1) * ntok - seq_len
+            pad_seq = torch.tensor(self.padding_idx, device=src_tokens.device)
+            pad_seq = pad_seq.repeat((batch_size, pad_len))
+            src_tokens = torch.cat((src_tokens,pad_seq), axis=1)
+        phrase_shape = (batch_size, src_tokens.shape[1] // ntok, ntok)
+        #END YOUR CODE
+        
         if token_embedding is None:
             token_embedding = self.embed_tokens(src_tokens)
         x = embed = self.embed_scale * token_embedding
@@ -405,21 +442,8 @@ class TransformerEncoder(FairseqEncoder):
         x = self.dropout_module(x)
         if self.quant_noise is not None:
             x = self.quant_noise(x)
-            
-        # START YOUR CODE
-        src_phrase_tokens = self.ngram_reshape(src_tokens)
-        token_phrase_embedding = embed_phrase = self.embed_tokens(src_phrase_tokens)
-        x_phrase = self.embed_scale * token_phrase_embedding
-        if self.embed_positions is not None:
-            bz, total_phrase, total_tok, _ = embed_phrase.shape
-            x_phrase = embed_phrase + self.embed_positions(src_phrase_tokens).reshape(bz, total_phrase, total_tok,-1)
-        if self.layernorm_embedding is not None:
-            x_phrase = self.layernorm_embedding(x_phrase)
-        x_phrase = self.dropout_module(x_phrase)
-        if self.quant_noise is not None:
-            x_phrase = self.quant_noise(x_phrase)
-        # END YOUR CODE
-        return x, embed, x_phrase
+        
+        return x, embed, phrase_shape, src_tokens
 
     def forward(
         self,
@@ -451,7 +475,7 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        x, encoder_embedding, x_phrase = self.forward_embedding(src_tokens, token_embeddings)
+        x, encoder_embedding, phrase_shape, src_tokens = self.forward_embedding(src_tokens, token_embeddings)
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
@@ -465,7 +489,7 @@ class TransformerEncoder(FairseqEncoder):
         # START YOUR CODE
         encoder_phrase_attentive = None
         for layer in self.layers:
-            x, attentive_phrase = layer(x, encoder_padding_mask, x_phrase)
+            x, attentive_phrase = layer(x, encoder_padding_mask, phrase_shape)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
