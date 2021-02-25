@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+    # Copyright (c) Facebook, Inc. and its affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -120,6 +120,9 @@ def collate(
         },
         "target": target,
     }
+    # START YOUR CODE
+
+    # END YOUR CODE
     if prev_output_tokens is not None:
         batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(
             0, sort_order
@@ -297,7 +300,9 @@ class LanguagePairDataset(FairseqDataset):
         else:
             self.buckets = None
         self.pad_to_multiple = pad_to_multiple
+        # START YOUR CODE
 
+        # END YOUR CODE
     def get_batch_shapes(self):
         return self.buckets
 
