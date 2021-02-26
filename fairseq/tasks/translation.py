@@ -52,6 +52,7 @@ def load_langpair_dataset(
     num_buckets=0,
     shuffle=True,
     pad_to_multiple=1,
+    graph_path = None
 ):
     def split_exists(split, src, tgt, lang, data_path):
         filename = os.path.join(data_path, "{}.{}-{}.{}".format(split, src, tgt, lang))
@@ -59,7 +60,31 @@ def load_langpair_dataset(
 
     src_datasets = []
     tgt_datasets = []
-
+    # START YOUR CODE
+    src_edges = []
+    src_labels = []
+    with open(graph_path + ".edge", "r") as f:
+        all_data = f.readlines()
+    for i in range(0, len(all_data), 2):
+        u = all_data[i]
+        v = all_data[i+1]
+        u = [int(n) for n in u.replace('\n', '').split()]
+        v = [int(n) for n in v.replace('\n', '').split()]
+        assert len(u) == len(v)
+        src_edges.append((u, v))
+    del all_data
+    with open(graph_path + '.label', "r") as f:
+        label_list = f.readlines()
+    for data in all_data:
+        src_labels.append(data.replace('\n','').split())
+    del label_list
+    logger.info(
+            "{} {} examples".format(
+                graph_path+'.edge', len(src_edges)))
+    logger.info(
+            "{} {} examples".format(
+                graph_path+'.label', len(src_labels)))
+    # END YOUR CODE
     for k in itertools.count():
         split_k = split + (str(k) if k > 0 else "")
 
@@ -233,6 +258,14 @@ class TranslationTask(LegacyFairseqTask):
                                  'e.g., \'{"beam": 4, "lenpen": 0.6}\'')
         parser.add_argument('--eval-bleu-print-samples', action='store_true',
                             help='print sample generations during validation')
+        # START YOUR CODE
+        parser.add_argument('--graph-train-path', type=str, metavar='GRAPH',
+                            help='graph data path for train')
+        parser.add_argument('--graph-valid-path', type=str, metavar='GRAPH',
+                            help='graph data path for valid')
+        parser.add_argument('--graph-test-path', type=str, metavar='GRAPH',
+                            help='graph data path for test')
+        # END YOUR CODE
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict):
@@ -292,7 +325,17 @@ class TranslationTask(LegacyFairseqTask):
 
         # infer langcode
         src, tgt = self.args.source_lang, self.args.target_lang
-
+        # START YOUR CODE
+        if split == 'train':
+            graph_path = self.args.graph_train_path
+        elif split == 'valid':
+            graph_path = self.args.graph_valid_path
+        elif split == 'test':
+            graph_path = self.args.graph_test_path
+        else:
+            graph_path = None
+            logger.info("No support split {}".format(split))
+        # END YOUR CODE
         self.datasets[split] = load_langpair_dataset(
             data_path,
             split,
@@ -312,6 +355,7 @@ class TranslationTask(LegacyFairseqTask):
             num_buckets=self.args.num_batch_buckets,
             shuffle=(split != "test"),
             pad_to_multiple=self.args.required_seq_len_multiple,
+            graph_path = graph_path
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):

@@ -36,8 +36,7 @@ class Dictionary(object):
         self.eos_index = self.add_symbol(eos)
         self.unk_index = self.add_symbol(unk)
         # START YOUR CODE
-        self.intnode_index = self.add_symbol("intnode")
-        print(self.intnode_index)
+        self.intnode_index = self.add_symbol("IntNode")
         # END YOUR CODE
         if extra_special_symbols:
             for s in extra_special_symbols:
@@ -204,7 +203,10 @@ class Dictionary(object):
     def unk(self):
         """Helper to get index of unk symbol"""
         return self.unk_index
-
+    # START YOUR CODE
+    def intnode(self):
+        return self.intnode_index
+    # END YOUR CODE
     @classmethod
     def load(cls, f):
         """Loads the dictionary from a text file with the format:

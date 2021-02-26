@@ -250,9 +250,6 @@ def main(args):
     def make_all(lang, vocab):
         if args.trainpref:
             make_dataset(vocab, args.trainpref, "train", lang, num_workers=args.workers)
-        # START YOUR CODE
-
-        # END YOUR CODE
         if args.validpref:
             for k, validpref in enumerate(args.validpref.split(",")):
                 outprefix = "valid{}".format(k) if k > 0 else "valid"
