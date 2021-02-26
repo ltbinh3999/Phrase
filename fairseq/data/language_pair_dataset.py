@@ -173,7 +173,7 @@ class UCCALabel:
   def __init__(self):
     self.labels = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'L', 'N', 'P', 'R', 'S', 'U']
     self.special_label = ['pad']
-    self.label_dict = {}
+    self.label_dict = {} # total 14 labels
     self.setupDict()
   def setupDict(self):
     for label in (self.special_label + self.labels):
@@ -187,7 +187,10 @@ class UCCALabel:
     assert label in self.label_dict, label
     return self.label_dict[label]
   def Label2Seq(self, label):
-    return torch.tensor(list(map(self.getIdx, label)))
+    label_list = []
+    for l in label:
+      label_list.append(torch.LongTensor(list(map(self.getIdx, l))))
+    return label_list
 # END YOUR CODE
 class LanguagePairDataset(FairseqDataset):
     """
@@ -326,18 +329,19 @@ class LanguagePairDataset(FairseqDataset):
         # START YOUR CODE
         self.src_edges = src_edges
         self.ucca = UCCALabel()
-        self.src_labels = UCCALabel.Label2Seq(src_labels)
+        self.src_labels = self.ucca.Label2Seq(src_labels)
         self.intnode_index = self.src_dict.intnode()
-        self.src_selectedIdx = None
+        self.src_selected_idx = None
         self.get_selected_index()
         # END YOUR CODE
     
     # START YOUR CODE
     def get_selected_index(self):
         def selectIndexTensor(idx):
-            index = [i for i, w in enumerate(idx) if w != self.intnode_index]
-            return index
-        self.src_selectedIdx = [selectIndexTensor(src) for src in self.src]
+            select = idx != self.intnode_index
+            position = torch.LongTensor(list(range(idx.size(0))))
+            return position[select]
+        self.src_selected_idx = [selectIndexTensor(src) for src in self.src]
     # END YOUR CODE
     def get_batch_shapes(self):
         return self.buckets
@@ -372,6 +376,9 @@ class LanguagePairDataset(FairseqDataset):
             "id": index,
             "source": src_item,
             "target": tgt_item,
+            "src_edges": self.src_edges[index],
+            "src_labels": self.src_labels[index],
+            "src_selected_idx": self.src_selected_idx[index]
         }
         if self.align_dataset is not None:
             example["alignment"] = self.align_dataset[index]

@@ -73,7 +73,7 @@ def load_langpair_dataset(
         u = [int(n) for n in u.replace('\n', '').split()]
         v = [int(n) for n in v.replace('\n', '').split()]
         assert len(u) == len(v)
-        src_edges.append(torch.tensor((u, v)))
+        src_edges.append(torch.LongTensor((u, v)))
     del all_data
     with open(graph_path + '.label', "r") as f:
         label_list = f.readlines()
