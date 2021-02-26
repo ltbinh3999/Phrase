@@ -8,7 +8,7 @@ import logging
 import numpy as np
 import torch
 from fairseq.data import FairseqDataset, data_utils
-
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,27 @@ def collate(
     return batch
 
 
+# START YOUR CODE
+class UCCALabel:
+  def __init__(self):
+    self.labels = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'L', 'N', 'P', 'R', 'S', 'U']
+    self.special_label = ['pad']
+    self.label_dict = {}
+    self.setupDict()
+  def setupDict(self):
+    for label in (self.special_label + self.labels):
+      self.pushToDict(label)
+  def pushToDict(self, label):
+    if label not in self.label_dict:
+      self.label_dict[label] = len(self.label_dict)
+  def getPadIdx(self):
+      return self.label_dict['pad']
+  def getIdx(self, label):
+    assert label in self.label_dict, label
+    return self.label_dict[label]
+  def Label2Seq(self, label):
+    return torch.tensor(list(map(self.getIdx, label)))
+# END YOUR CODE
 class LanguagePairDataset(FairseqDataset):
     """
     A pair of torch.utils.data.Datasets.
@@ -229,6 +250,8 @@ class LanguagePairDataset(FairseqDataset):
         src_lang_id=None,
         tgt_lang_id=None,
         pad_to_multiple=1,
+        src_edges = None,
+        src_labels = None
     ):
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
@@ -301,8 +324,21 @@ class LanguagePairDataset(FairseqDataset):
             self.buckets = None
         self.pad_to_multiple = pad_to_multiple
         # START YOUR CODE
-
+        self.src_edges = src_edges
+        self.ucca = UCCALabel()
+        self.src_labels = UCCALabel.Label2Seq(src_labels)
+        self.intnode_index = self.src_dict.intnode()
+        self.src_selectedIdx = None
+        self.get_selected_index()
         # END YOUR CODE
+    
+    # START YOUR CODE
+    def get_selected_index(self):
+        def selectIndexTensor(idx):
+            index = [i for i, w in enumerate(idx) if w != self.intnode_index]
+            return index
+        self.src_selectedIdx = [selectIndexTensor(src) for src in self.src]
+    # END YOUR CODE
     def get_batch_shapes(self):
         return self.buckets
 

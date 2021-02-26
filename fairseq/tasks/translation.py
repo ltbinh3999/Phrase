@@ -23,7 +23,7 @@ from fairseq.data import (
     indexed_dataset,
 )
 from fairseq.tasks import LegacyFairseqTask, register_task
-
+import torch
 
 EVAL_BLEU_ORDER = 4
 
@@ -61,6 +61,8 @@ def load_langpair_dataset(
     src_datasets = []
     tgt_datasets = []
     # START YOUR CODE
+    # type(src_datasets) = fairseq.data.indexed_dataset.MMapIndexedDataset
+    # type(src_datasets[0]) = torch.Tensor
     src_edges = []
     src_labels = []
     with open(graph_path + ".edge", "r") as f:
@@ -71,19 +73,19 @@ def load_langpair_dataset(
         u = [int(n) for n in u.replace('\n', '').split()]
         v = [int(n) for n in v.replace('\n', '').split()]
         assert len(u) == len(v)
-        src_edges.append((u, v))
+        src_edges.append(torch.tensor((u, v)))
     del all_data
     with open(graph_path + '.label', "r") as f:
         label_list = f.readlines()
-    for data in all_data:
+    for data in label_list:
         src_labels.append(data.replace('\n','').split())
     del label_list
     logger.info(
-            "{} {} examples".format(
-                graph_path+'.edge', len(src_edges)))
+            "loaded {} examples from: {}".format(
+                len(src_edges), graph_path+'.edge'))
     logger.info(
-            "{} {} examples".format(
-                graph_path+'.label', len(src_labels)))
+            "loaded {} examples from: {}".format(
+                len(src_labels), graph_path+'.label'))
     # END YOUR CODE
     for k in itertools.count():
         split_k = split + (str(k) if k > 0 else "")
@@ -183,6 +185,8 @@ def load_langpair_dataset(
         num_buckets=num_buckets,
         shuffle=shuffle,
         pad_to_multiple=pad_to_multiple,
+        src_edges = src_edges,
+        src_labels = src_labels
     )
 
 
