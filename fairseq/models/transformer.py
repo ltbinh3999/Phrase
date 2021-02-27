@@ -30,6 +30,10 @@ from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
 
+# START YOUR CODE
+from fairseq.modules.graph_modules import EdgeConv
+# END YOUR CODE
+
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -257,6 +261,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
         self,
         src_tokens,
         src_lengths,
+        # START YOUR CODE
+        src_edges,
+        src_labels,
+        src_selected_idx,
+        # END YOUR CODE
         prev_output_tokens,
         return_all_hiddens: bool = True,
         features_only: bool = False,
@@ -270,7 +279,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
         which are not supported by TorchScript.
         """
         encoder_out = self.encoder(
-            src_tokens, src_lengths=src_lengths, return_all_hiddens=return_all_hiddens
+            src_tokens, src_lengths=src_lengths, 
+            src_edges = src_edges, src_labels= src_labels, 
+            src_selected_idx = src_selected_idx, return_all_hiddens=return_all_hiddens
         )
         decoder_out = self.decoder(
             prev_output_tokens,
@@ -363,7 +374,10 @@ class TransformerEncoder(FairseqEncoder):
             self.layer_norm = LayerNorm(embed_dim)
         else:
             self.layer_norm = None
-
+        # START YOUR CODE
+        self.embed_dim = embed_dim
+        self.graph_encode = EdgeConv(self.embed_dim, self.embed_dim)
+        # END YOUR CODE
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
         if getattr(args, "checkpoint_activations", False):
@@ -371,12 +385,17 @@ class TransformerEncoder(FairseqEncoder):
         return layer
 
     def forward_embedding(
-        self, src_tokens, token_embedding: Optional[torch.Tensor] = None
+        self, src_tokens, token_embedding: Optional[torch.Tensor] = None,
+        src_edges, src_selected_idx
     ):
         # embed tokens and positions
         if token_embedding is None:
             token_embedding = self.embed_tokens(src_tokens)
         x = embed = self.embed_scale * token_embedding
+        # START YOUR CODE
+        x = self.graph_encode(x, src_edges)
+        x = torch.gather(x_embed, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,self.embed_dim))
+        # END YOUR CODE
         if self.embed_positions is not None:
             x = embed + self.embed_positions(src_tokens)
         if self.layernorm_embedding is not None:
@@ -391,6 +410,9 @@ class TransformerEncoder(FairseqEncoder):
         src_tokens,
         src_lengths,
         return_all_hiddens: bool = False,
+        src_edges,
+        src_labels,
+        src_selected_idx,
         token_embeddings: Optional[torch.Tensor] = None,
     ):
         """
@@ -416,7 +438,7 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
+        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings, src_edges, src_selected_idx)
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)

@@ -109,7 +109,38 @@ def collate(
             )
     else:
         ntokens = src_lengths.sum().item()
-
+    # START YOUR CODE
+    extra_length = src_tokens.eq(pad_idx).long().sum(1)
+    max_len = max(len(samples[i]['src_selected_idx']) for i in range(len(samples)))
+    seq_len = src_tokens.size(1)
+    src_labels = [samples[i]['src_labels'] for i in sort_order]
+    def tensorSelectedIndex(data):
+        i, e = data
+        x = samples[i]['src_selected_idx'] + e
+        pad = torch.LongTensor([0] * (max_len - x.size(0)))
+        return torch.cat([pad, x], dim = 0)
+    src_selected_idx = torch.cat([tensorSelectedIndex(data) for data in zip(sort_order, extra_length)],dim=0).reshape(-1, max_len)
+    def tensorEdges(data):
+        i, [order, e] = data
+        edge = samples[order]['src_edges'] + e # move idx to the right, since padding to the left
+        edge = edge + i * seq_len
+        return edge
+    src_edges = None
+    for data in enumerate(zip(sort_order, extra_length)):
+      r = tensorEdges(data)
+      if src_edges == None:
+        src_edges = r
+      else:
+        src_edges = torch.cat([src_edges, r], dim = 1) # shape = [2, Edges]
+    src_labels = None
+    for s in sort_order:
+        l = samples[s]['src_labels']
+        if src_labels == None:
+            src_labels = l
+        else:
+            src_labels = torch.cat([src_labels, l], dim = 0) # shape = [Labels]
+    assert src_edges.size(1) == src_labels.size(0)
+    # END YOUR CODE
     batch = {
         "id": id,
         "nsentences": len(samples),
@@ -117,22 +148,13 @@ def collate(
         "net_input": {
             "src_tokens": src_tokens,
             "src_lengths": src_lengths,
+            "src_edges": src_edges,
+            "src_labels": src_labels,
+            "src_selected_idx": src_selected_idx,
         },
         "target": target,
     }
-    # START YOUR CODE
-    extra_length = src_tokens.eq(pad_idx).long().sum(1)
-    max_len = max(len(samples[i]['src_selected_idx']) for i in len(samples))
-    src_edges = [samples[i]['src_edges'] + e for i, e in zip(sort_order, extra_length)]
-    src_labels = [samples[i]['src_labels'] for i in sort_order]
-    src_selected_idx = [samples[i]['src_selected_idx'] + e for i, e in zip(sort_order, extra_length)]
-    def tensorSelectedIndex(data):
-        i, e = data
-        x = samples[i]['src_selected_idx'] + e
-        pad = torch.LongTensor([0] * (max_len - x.size(0)))
-        return torch.cat([pad, x], dim = 0)
-    test = torch.LongTensor([tensorSelectedIndex(data) for data in zip(sort_order, extra_length)])
-    # END YOUR CODE
+    
     if prev_output_tokens is not None:
         batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(
             0, sort_order
