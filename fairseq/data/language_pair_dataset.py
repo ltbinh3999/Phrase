@@ -121,7 +121,17 @@ def collate(
         "target": target,
     }
     # START YOUR CODE
-
+    extra_length = src_tokens.eq(pad_idx).long().sum(1)
+    max_len = max(len(samples[i]['src_selected_idx']) for i in len(samples))
+    src_edges = [samples[i]['src_edges'] + e for i, e in zip(sort_order, extra_length)]
+    src_labels = [samples[i]['src_labels'] for i in sort_order]
+    src_selected_idx = [samples[i]['src_selected_idx'] + e for i, e in zip(sort_order, extra_length)]
+    def tensorSelectedIndex(data):
+        i, e = data
+        x = samples[i]['src_selected_idx'] + e
+        pad = torch.LongTensor([0] * (max_len - x.size(0)))
+        return torch.cat([pad, x], dim = 0)
+    test = torch.LongTensor([tensorSelectedIndex(data) for data in zip(sort_order, extra_length)])
     # END YOUR CODE
     if prev_output_tokens is not None:
         batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(
