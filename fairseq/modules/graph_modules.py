@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 
+from fairseq import utils
 from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 
@@ -50,20 +51,20 @@ class EdgeConv(MessagePassing):
         return self.mlp(edge_features)
 
 class UCCAEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, args):
+    def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
-        self.input_dim = input_dim
+        self.in_dim = in_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        self.out_dim = out_dim
         self.quant_noise = getattr(args, 'quant_noise_pq', 0)
         self.quant_noise_block_size = getattr(args, 'quant_noise_pq_block_size', 8) or 8
         self.num_layers = 3 # hard-code
         self.dropout = args.dropout
         self.convs = nn.ModuleList()
         Model = EdgeConv
-        self.convs.append(Model(input_dim, hidden_dim))
-        for i in range(i-1):
-            self.convs.append(Model(hidden_dim, hidden_dim))
+        self.convs.append(Model(in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args))
+        for i in range(self.num_layers-1):
+            self.convs.append(Model(hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args))
 
         self.ffn = FeedForward(hidden_dim, hidden_dim, out_dim, self.quant_noise, self.quant_noise_block_size, args)
 
@@ -75,7 +76,7 @@ class UCCAEncoder(nn.Module):
         
         x = self.ffn(x)
 
-        batch, seql, dim = x.shape 
-        x = x.reshape(batch, seql, dim)
+        batch, dim = selected_idx.size(0), x.size(1) 
+        x = x.reshape(batch, -1, dim)
         x = torch.gather(x, 1, selected_idx.unsqueeze(-1).repeat(1,1,dim))
         return x

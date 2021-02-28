@@ -388,10 +388,6 @@ def _main(cfg: DictConfig, output_file):
 
 def cli_main():
     parser = options.get_generation_parser()
-    # START YOUR CODE
-    parser.add_argument('--graph-test-path', type=str, metavar='GRAPH',
-                            help='graph data path for test')
-    # END YOUR CODE
     args = options.parse_args_and_arch(parser)
     main(args)
 
