@@ -179,6 +179,10 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='block size of quantization noise at training time')
         parser.add_argument('--quant-noise-scalar', type=float, metavar='D', default=0,
                             help='scalar quantization noise and scalar quantization at training time')
+        # START YOUR CODE
+        parser.add_argument('--graph-type', type=str, metavar='STR',
+                            help='graph module type e.g: GAT, Sage, normal')
+        # END YOUR CODE
         # fmt: on
 
     @classmethod
