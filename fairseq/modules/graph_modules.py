@@ -60,8 +60,8 @@ class GraphSage(MessagePassing):
                 reducer='mean', normalize_embedding=True):
         super(GraphSage, self).__init__(aggr='mean')
 
-        self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size, args)
-        self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size, args)
+        self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
+        self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
         init_weights(self.lin)
         init_weights(self.agg_lin)
         if normalize_embedding:
@@ -93,16 +93,18 @@ class GAT(MessagePassing):
 
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.head_dim = out_channels // num_heads
+        assert out_channels % num_heads == 0
         self.heads = num_heads
         self.concat = concat 
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
-        self.lin = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, args)
-        self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.out_channels))
+        self.lin = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
+        self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.head_dim))
 
         if bias and concat:
-            self.bias = nn.Parameter(torch.Tensor(self.heads * out_channels))
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
         elif bias and not concat:
             self.bias = nn.Parameter(torch.Tensor(out_channels))
         else:
@@ -114,18 +116,18 @@ class GAT(MessagePassing):
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
-        x_i = x_i.view(-1, self.heads, self.out_channels)
-        x_j = x_j.view(-1, self.heads, self.out_channels)
-        x_cat = torch.cat([x_i, x_j], dim=-1)
+        x_i = x_i.view(-1, self.heads, self.head_dim)
+        x_j = x_j.view(-1, self.heads, self.head_dim)
+        x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
         alpha = F.leaky_relu((x_cat * self.att).sum(-1), 0.2)
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
 
-        return (x_j * alpha.unsqueeze(-1)).view(-1, self.heads * self.out_channels)
+        return (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
     def update(self, aggr_out):
         if self.concat is True:
-            aggr_out = aggr_out.view(-1, self.heads * self.out_channels)
+            aggr_out = aggr_out.view(-1, self.out_channels)
         else:
             aggr_out = aggr_out.mean(dim=1)
 
