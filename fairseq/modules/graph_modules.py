@@ -6,6 +6,7 @@ from torch_geometric.nn import MessagePassing
 from fairseq import utils
 from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
+from fairseq.modules import LayerNorm
 
 def init_weights(m):
     if type(m) == nn.Linear:
@@ -59,7 +60,12 @@ class UCCAEncoder(nn.Module):
         self.quant_noise = getattr(args, 'quant_noise_pq', 0)
         self.quant_noise_block_size = getattr(args, 'quant_noise_pq_block_size', 8) or 8
         self.num_layers = 3 # hard-code
-        self.dropout = args.dropout
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
+
+        self.convs_layer_norm = LayerNorm(self.in_dim)
+        self.ffn_layer_norm = LayerNorm(self.hidden_dim)
         self.convs = nn.ModuleList()
         Model = EdgeConv
         self.convs.append(Model(in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args))
@@ -68,13 +74,21 @@ class UCCAEncoder(nn.Module):
 
         self.ffn = FeedForward(hidden_dim, hidden_dim, out_dim, self.quant_noise, self.quant_noise_block_size, args)
 
+    def residual_connection(self, x, residual):
+        return residual + x
     def forward(self, x, edge_index, selected_idx, edge_label):
         for convs in self.convs:
+            residual = x
+            x = self.convs_layer_norm(x)
             x = convs(x, edge_index)
             x = F.relu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = self.dropout_module(x)
+            x = self.residual_connection(x, residual)
         
+        residual = x
+        x = self.ffn_layer_norm(x)
         x = self.ffn(x)
+        x = self.residual_connection(x, residual)
 
         batch, dim = selected_idx.size(0), x.size(1) 
         x = x.reshape(batch, -1, dim)

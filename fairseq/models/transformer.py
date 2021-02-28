@@ -376,7 +376,7 @@ class TransformerEncoder(FairseqEncoder):
             self.layer_norm = None
         # START YOUR CODE
         self.embed_dim = embed_dim
-        self.graph_encode = UCCAEncoder(self.embed_dim, 1024, self.embed_dim, args)
+        self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
         # END YOUR CODE
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
