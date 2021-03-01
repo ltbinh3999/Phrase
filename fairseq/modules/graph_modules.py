@@ -148,11 +148,11 @@ class UCCAEncoder(nn.Module):
             args.dropout, module_name=self.__class__.__name__
         )
         self.graph_type = getattr(args, 'graph_type', None)
-        if graph_type == "GAT":
+        if self.graph_type == "GAT":
             Model = GAT
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
             settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-        elif graph_type == "GraphSage":
+        elif self.graph_type == "GraphSage":
             Model = GraphSage
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
             settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
