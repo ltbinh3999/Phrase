@@ -16,9 +16,9 @@ def init_weights(m):
         torch.nn.init.xavier_uniform_(m.weight)
         m.bias.data.fill_(0.01)
     return
-def build_linear(input_dim, output_dim, q_noise, qn_block_size):
+def build_linear(input_dim, output_dim, q_noise, qn_block_size, bias=True):
     return quant_noise(
-            nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
+            nn.Linear(input_dim, output_dim, bias=bias), p=q_noise, block_size=qn_block_size
         )
 class FeedForward(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, quant_noise, qn_block_size, args):
@@ -45,13 +45,16 @@ class FeedForward(nn.Module):
 class EdgeConv(MessagePassing):
     def __init__(self, F_in, F_out, quant_noise, qn_block_size, args):
         super(EdgeConv, self).__init__(aggr='max')  # "Max" aggregation.
-        self.mlp = FeedForward(2*F_in, F_out, F_out, quant_noise, qn_block_size, args)
+        self.mlp = FeedForward(F_in, F_out, F_out, quant_noise, qn_block_size, args)
+        self.label_linear = build_linear(2 * F_in, F_in, quant_noise, qn_block_size, bias=False)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, x_label):
+        self.x_label = x_label
         return self.propagate(edge_index, x=x)
 
     def message(self, x_i, x_j):
         edge_features = torch.cat([x_i, x_j - x_i], dim=1)
+        edge_features = self.label_linear(edge_features) + self.x_label
         return self.mlp(edge_features)
 
 class GraphSage(MessagePassing):
@@ -66,7 +69,7 @@ class GraphSage(MessagePassing):
         init_weights(self.agg_lin)
         if normalize_embedding:
             self.normalize_emb = True
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, x_label):
         num_nodes = x.size(0)
         out = self.propagate(edge_index, size=(num_nodes, num_nodes), x=x)
         out = self.agg_lin(out)
@@ -112,7 +115,7 @@ class GAT(MessagePassing):
 
         nn.init.xavier_uniform_(self.att)
         nn.init.zeros_(self.bias)
-    def forward(self, x, edge_index, size=None):
+    def forward(self, x, edge_index, x_label, size=None):
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
@@ -138,6 +141,8 @@ class GAT(MessagePassing):
 class UCCAEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
+        self.label_embedding = nn.Embedding(13, in_dim)
+        nn.init.normal_(self.label_embedding.weight, mean=0, std=in_dim ** -0.5)
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.out_dim = out_dim
@@ -168,15 +173,16 @@ class UCCAEncoder(nn.Module):
         for i in range(self.num_layers-1):
             self.convs.append(Model(*settings_else))
 
-        self.ffn = FeedForward(hidden_dim, hidden_dim, out_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.ffn = FeedForward(hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, selected_idx, edge_label):
+        x_label = self.label_embedding(edge_label)
         for convs in self.convs:
             residual = x
             x = self.convs_layer_norm(x)
-            x = convs(x, edge_index)
+            x = convs(x, edge_index, x_label)
             x = F.relu(x)
             x = self.dropout_module(x)
             x = self.residual_connection(x, residual)

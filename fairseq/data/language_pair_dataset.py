@@ -204,17 +204,14 @@ def collate(
 class UCCALabel:
   def __init__(self):
     self.labels = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'L', 'N', 'P', 'R', 'S', 'U']
-    self.special_label = ['pad']
-    self.label_dict = {} # total 14 labels
+    self.label_dict = {} # total 13 labels
     self.setupDict()
   def setupDict(self):
-    for label in (self.special_label + self.labels):
+    for label in (self.labels):
       self.pushToDict(label)
   def pushToDict(self, label):
     if label not in self.label_dict:
       self.label_dict[label] = len(self.label_dict)
-  def getPadIdx(self):
-      return self.label_dict['pad']
   def getIdx(self, label):
     assert label in self.label_dict, label
     return self.label_dict[label]
