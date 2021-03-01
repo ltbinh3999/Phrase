@@ -152,7 +152,7 @@ class UCCAEncoder(nn.Module):
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
-        self.graph_type = getattr(args, 'graph_type', None)
+        graph_type = getattr(args, 'graph_type', None)
         if graph_type == "GAT":
             Model = GAT
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
