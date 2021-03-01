@@ -115,7 +115,9 @@ class GAT(MessagePassing):
 
         nn.init.xavier_uniform_(self.att)
         nn.init.zeros_(self.bias)
+        self.label_linear = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, bias=False)
     def forward(self, x, edge_index, x_label, size=None):
+        self.x_label = x_label
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
@@ -126,8 +128,9 @@ class GAT(MessagePassing):
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
-
-        return (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
+        edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
+        edge_features = self.label_linear(edge_features) + self.x_label
+        return edge_features
     def update(self, aggr_out):
         if self.concat is True:
             aggr_out = aggr_out.view(-1, self.out_channels)
