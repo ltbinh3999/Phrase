@@ -15,12 +15,15 @@ from fairseq.modules import LayerNorm
 def init_weights(m):
     if type(m) == nn.Linear:
         torch.nn.init.xavier_uniform_(m.weight)
-        m.bias.data.fill_(0.01)
+        if m.bias != None:
+          m.bias.data.fill_(0.01)
     return
 def build_linear(input_dim, output_dim, q_noise, qn_block_size, bias=True):
-    return quant_noise(
+    linear = quant_noise(
             nn.Linear(input_dim, output_dim, bias=bias), p=q_noise, block_size=qn_block_size
         )
+    init_weights(linear)
+    return linear
 class FeedForward(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, quant_noise, qn_block_size, args):
         super().__init__()
@@ -36,8 +39,6 @@ class FeedForward(nn.Module):
         self.activation_dropout_module = FairseqDropout(
             float(activation_dropout_p), module_name=self.__class__.__name__
         )
-        self.fc1.apply(init_weights)
-        self.fc2.apply(init_weights)
     def forward(self, x):
         x = self.phrase_activation_fn(self.fc1(x))
         x = self.activation_dropout_module(x)
@@ -47,12 +48,8 @@ class FeedForward(nn.Module):
 class GatingResidual(nn.Module):
     def __init__(self, embed_dim, quant_noise, qn_block_size, args):
         super().__init__()
-        self.fc1 = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
-        self.fc_sublayer = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
-    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size):
-      return quant_noise(
-            nn.Linear(input_dim, output_dim, bias = False), p=q_noise, block_size=qn_block_size
-        )
+        self.fc1 = build_linear(embed_dim, 1, quant_noise, qn_block_size, False)
+        self.fc_sublayer = build_linear(embed_dim, 1, quant_noise, qn_block_size, False)
     def forward(self, x, sublayer):
         alpha = torch.sigmoid(self.fc1(x) + self.fc_sublayer(sublayer))
         x = alpha * x + (1 - alpha) * sublayer
@@ -136,8 +133,6 @@ class GraphSage(MessagePassing):
 
         self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
         self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
-        init_weights(self.lin)
-        init_weights(self.agg_lin)
         if normalize_embedding:
             self.normalize_emb = True
     def forward(self, x, edge_index, x_label):
@@ -195,8 +190,6 @@ class GAT(MessagePassing):
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
-        
-
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
