@@ -195,8 +195,6 @@ class GAT(MessagePassing):
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
-        
-
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
@@ -224,10 +222,12 @@ class GAT(MessagePassing):
 class UCCAEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
-        self.label_embedding = nn.Embedding(13, in_dim)
-        nn.init.normal_(self.label_embedding.weight, mean=0, std=in_dim ** -0.5)
+        self.hidden_dim = 1024
+
+        self.label_embedding = nn.Embedding(13, self.hidden_dim)
+        nn.init.normal_(self.label_embedding.weight, mean=0, std=self.hidden_dim ** -0.5)
+
         self.in_dim = in_dim
-        self.hidden_dim = hidden_dim
         self.out_dim = out_dim
         self.quant_noise = getattr(args, 'quant_noise_pq', 0)
         self.quant_noise_block_size = getattr(args, 'quant_noise_pq_block_size', 8) or 8
@@ -235,36 +235,36 @@ class UCCAEncoder(nn.Module):
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
+
         graph_type = getattr(args, 'graph_type', None)
         if graph_type == "GAT":
             Model = GAT
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            settings = (self.hidden_dim, self.hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         elif graph_type == "GraphSage":
             Model = GraphSage
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+            settings = (self.hidden_dim, self.hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
         else:
             Model = EdgeConv
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+            settings = (self.hidden_dim, self.hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
 
         
         self.convs = nn.ModuleList()
-        self.convs.append(Model(*settings_first))
-        for i in range(self.num_layers-1):
-            self.convs.append(Model(*settings_else))
+        for i in range(self.num_layers):
+            self.convs.append(Model(*settings))
 
-        self.ffn = FeedForward(hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru = nn.GRUCell(self.in_dim, self.in_dim)
-        self.gru_ffn = FeedForward(self.in_dim, 2048, self.in_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.ffn = FeedForward(self.hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.gru = nn.GRUCell(self.hidden_dim, self.hidden_dim)
+        self.gru_ffn = FeedForward(self.hidden_dim, 2048, self.hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.first_linear = build_linear(self.in_dim, self.hidden_dim, self.quant_noise, self.quant_noise_block_size)
+
         self.gru_layer_norm = LayerNorm(self.in_dim)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.ffn_layer_norm = LayerNorm(self.hidden_dim)
-
+        
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, selected_idx, edge_label):
+        x = self.first_linear(x)
         x_label = self.label_embedding(edge_label)
         for convs in self.convs:
             prev_x = x
@@ -275,10 +275,8 @@ class UCCAEncoder(nn.Module):
             x = self.gru(x, prev_x)
             x = x + self.gru_ffn(self.gru_layer_norm(x))
         
-        residual = x
         x = self.ffn_layer_norm(x)
         x = self.ffn(x)
-        x = self.residual_connection(x, residual)
 
         batch, dim = selected_idx.size(0), x.size(1) 
         x = x.reshape(batch, -1, dim)
