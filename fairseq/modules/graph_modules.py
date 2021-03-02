@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 
 from torch_geometric.nn import MessagePassing
 import torch_geometric.nn as pyg_nn
@@ -42,6 +43,76 @@ class FeedForward(nn.Module):
         x = self.activation_dropout_module(x)
         x = self.fc2(x)
         return x
+
+class GatingResidual(nn.Module):
+    def __init__(self, embed_dim, quant_noise, qn_block_size, args):
+        super().__init__()
+        self.fc1 = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
+        self.fc_sublayer = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
+    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size):
+      return quant_noise(
+            nn.Linear(input_dim, output_dim, bias = False), p=q_noise, block_size=qn_block_size
+        )
+    def forward(self, x, sublayer):
+        alpha = torch.sigmoid(self.fc1(x) + self.fc_sublayer(sublayer))
+        x = alpha * x + (1 - alpha) * sublayer
+        return x
+
+class SlotAttention(nn.Module):
+    def __init__(self, in_dim, out_dim, num_heads, quant_noise, qn_block_size, args, epsilon=1e-8):
+        super().__init__()
+        
+        self.eps = epsilon
+        self.num_iter = 3
+        self.num_heads = num_heads
+        self.dim_head = in_dim
+        self.mlp_hidden_dim = 2048 // self.num_heads
+        self.slots_mu = nn.Parameter(torch.Tensor(1, 1, self.dim_head))
+        self.slots_log_sigma = nn.Parameter(torch.Tensor(1, 1, self.dim_head))
+        nn.init.xavier_uniform_(self.slots_mu)
+        nn.init.xavier_uniform_(self.slots_log_sigma)
+        self.atten = nn.Parameter(torch.Tensor(self.num_heads, self.dim_head))
+        nn.init.xavier_uniform_(self.atten)
+
+        self.norm_slots = LayerNorm(self.dim_head)
+        self.norm_mlp = LayerNorm(self.dim_head)
+        
+        
+        self.project_q = build_linear(self.dim_head, self.dim_head, quant_noise, qn_block_size, False)
+        self.project_k = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
+        self.gru = nn.GRUCell(in_dim*num_heads, in_dim*num_heads)
+        
+        self.mlp = FeedForward(self.dim_head, self.mlp_hidden_dim, 
+                                     self.dim_head, quant_noise,
+                                     qn_block_size, args)
+
+    def forward(self, x, edge_index_i, size_i):
+        norm_dist = Variable(torch.empty(x.size(0), self.num_heads, self.dim_head,dtype=x.dtype)\
+                        .normal_(mean=0,std=1)).cuda()
+        slots = self.slots_mu + torch.exp(self.slots_log_sigma) * norm_dist
+
+        k = self.project_k(x) #Shape: [N, num_heads, embed_dim]
+        k = k * self.dim_head ** -0.5
+
+        # Shape: [N, num_labels, slot_dim]
+        for _ in range(self.num_iter):
+            slots_prev = slots.view(-1, self.dim_head * self.num_heads) 
+            slots = self.norm_slots(slots)
+            
+            q = self.project_q(slots)
+            q = q * self.dim_head ** -0.5
+            alpha = F.leaky_relu((q * self.atten).sum(-1), 0.2)
+            alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
+            
+            updates = slots * alpha.unsqueeze(-1)
+            updates = updates.view(-1, self.dim_head * self.num_heads)
+
+            slots = self.gru(updates, slots_prev).view(-1, self.num_heads, self.dim_head)
+            
+            slots = slots + self.mlp(self.norm_mlp(slots))
+        return slots.view(-1, self.num_heads * self.dim_head)
+
+
 class EdgeConv(MessagePassing):
     def __init__(self, F_in, F_out, quant_noise, qn_block_size, args):
         super(EdgeConv, self).__init__(aggr='max')  # "Max" aggregation.
@@ -105,6 +176,7 @@ class GAT(MessagePassing):
         )
         self.lin = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
         self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.head_dim))
+        nn.init.xavier_uniform_(self.att)
 
         if bias and concat:
             self.bias = nn.Parameter(torch.Tensor(out_channels))
@@ -112,24 +184,32 @@ class GAT(MessagePassing):
             self.bias = nn.Parameter(torch.Tensor(out_channels))
         else:
             self.register_parameter('bias', None)
-
-        nn.init.xavier_uniform_(self.att)
+      
         nn.init.zeros_(self.bias)
         self.label_linear = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, bias=False)
+        self.slot_attn = SlotAttention(self.head_dim, self.in_channels, self.heads, quant_noise, qn_block_size, args)
+        self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
+
     def forward(self, x, edge_index, x_label, size=None):
         self.x_label = x_label
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
+        
+
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
+
+        label_attn = self.slot_attn(x_cat, edge_index_i, size_i)
+        x_label = self.gating_label(label_attn, self.x_label)
+
         alpha = F.leaky_relu((x_cat * self.att).sum(-1), 0.2)
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
         edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
-        edge_features = self.label_linear(edge_features) + self.x_label
+        edge_features = self.label_linear(edge_features) + x_label
         return edge_features
     def update(self, aggr_out):
         if self.concat is True:
