@@ -169,14 +169,17 @@ class GAT(MessagePassing):
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
-        self.lin = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
-        self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.head_dim))
-        nn.init.xavier_uniform_(self.att)
+        self.lin_i = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
+        self.lin_j = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
+        self.att_i = nn.Parameter(torch.Tensor(self.heads, self.head_dim))
+        self.att_j = nn.Parameter(torch.Tensor(self.heads, self.head_dim))
+        nn.init.xavier_uniform_(self.att_i)
+        nn.init.xavier_uniform_(self.att_j)
 
         if bias and concat:
-            self.bias = nn.Parameter(torch.Tensor(out_channels))
+            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         elif bias and not concat:
-            self.bias = nn.Parameter(torch.Tensor(out_channels))
+            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         else:
             self.register_parameter('bias', None)
       
@@ -187,9 +190,10 @@ class GAT(MessagePassing):
 
     def forward(self, x, edge_index, x_label, size=None):
         self.x_label = x_label
-        x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
+        x_i = self.lin_i(x_i)
+        x_j = self.lin_j(x_j)
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
@@ -197,7 +201,7 @@ class GAT(MessagePassing):
         label_attn = self.slot_attn(x_cat, edge_index_i, size_i)
         x_label = self.gating_label(label_attn, self.x_label)
 
-        alpha = F.leaky_relu((x_cat * self.att).sum(-1), 0.2)
+        alpha = F.leaky_relu((x_i * self.att_i + x_j * self.att_j).sum(-1), 0.2)
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
