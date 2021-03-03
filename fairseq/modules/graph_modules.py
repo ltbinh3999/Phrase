@@ -157,7 +157,7 @@ class GAT(MessagePassing):
     def __init__(self, in_channels, out_channels, 
                 quant_noise, qn_block_size, args,
                 num_heads=1, concat=True,
-                bias=True, **kwargs):
+                bias=False, **kwargs):
         super(GAT, self).__init__(aggr='add', **kwargs)
 
         self.in_channels = in_channels
@@ -169,30 +169,30 @@ class GAT(MessagePassing):
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
-        self.lin_i = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
-        self.lin_j = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
-        self.att_i = nn.Parameter(torch.Tensor(self.heads, self.head_dim))
-        self.att_j = nn.Parameter(torch.Tensor(self.heads, self.head_dim))
-        nn.init.xavier_uniform_(self.att_i)
-        nn.init.xavier_uniform_(self.att_j)
+        self.lin = build_linear(self.in_channels, self.out_channels, quant_noise, qn_block_size)
+        self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.head_dim))
+        nn.init.xavier_uniform_(self.att)
 
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
         if bias and concat:
             self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         elif bias and not concat:
             self.bias = nn.Parameter(torch.Tensor(self.out_channels))
         else:
             self.register_parameter('bias', None)
-      
-        nn.init.zeros_(self.bias)
+        if bias:
+            nn.init.zeros_(self.bias)
         self.label_linear = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, bias=False)
         self.slot_attn = SlotAttention(self.head_dim, self.in_channels, self.heads, quant_noise, qn_block_size, args)
         self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
+        self.label_ffn_combine = FeedForward(2 * self.out_channels, 2048, self.out_channels, quant_noise, qn_block_size, args)
 
     def forward(self, x, edge_index, x_label, size=None):
         self.x_label = x_label
-        x_i = self.lin_i(x)
-        x_j = self.lin_j(x)
-        return self.propagate(edge_index, size=size, x=(x_i, x_j))
+        x = self.lin(x)
+        return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
         
         x_i = x_i.view(-1, self.heads, self.head_dim)
@@ -202,12 +202,16 @@ class GAT(MessagePassing):
         label_attn = self.slot_attn(x_cat, edge_index_i, size_i)
         x_label = self.gating_label(label_attn, self.x_label)
 
-        alpha = F.leaky_relu((x_i * self.att_i + x_j * self.att_j).sum(-1), 0.2)
+        alpha = F.leaky_relu((x_cat * self.att).sum(-1), 0.2)
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
         edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
-        edge_features = self.label_linear(edge_features) + x_label
+        residual = edge_features
+        edge_out = self.label_linear(edge_features) + x_label
+        edge_out = self.label_ffn_combine(torch.cat([edge_features, edge_out], dim=-1))
+        edge_out = self.dropout_module(edge_out)
+        edge_features = residual + edge_out
         return edge_features
     def update(self, aggr_out):
         if self.concat is True:
@@ -276,6 +280,7 @@ class UCCAEncoder(nn.Module):
         residual = x
         x = self.ffn_layer_norm(x)
         x = self.ffn(x)
+        x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
 
         batch, dim = selected_idx.size(0), x.size(1) 
