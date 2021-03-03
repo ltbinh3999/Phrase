@@ -190,10 +190,11 @@ class GAT(MessagePassing):
 
     def forward(self, x, edge_index, x_label, size=None):
         self.x_label = x_label
-        return self.propagate(edge_index, size=size, x=x)
+        x_i = self.lin_i(x)
+        x_j = self.lin_j(x)
+        return self.propagate(edge_index, size=size, x=(x_i, x_j))
     def message(self, edge_index_i, x_i, x_j, size_i):
-        x_i = self.lin_i(x_i)
-        x_j = self.lin_j(x_j)
+        
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
