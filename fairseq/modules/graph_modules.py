@@ -223,6 +223,64 @@ class GAT(MessagePassing):
             aggr_out = aggr_out + self.bias
         return aggr_out
 
+class GraphTransformer(MessagePassing):
+    def __init__(self, in_channels, out_channels: int, quant_noise, qn_block_size, args,
+                 heads: int = 1, concat: bool = True, beta: bool = False,
+                 dropout: float = 0.,
+                 bias: bool = True, root_weight: bool = True, **kwargs):
+        kwargs.setdefault('aggr', 'add')
+        super(TransformerConv, self).__init__(node_dim=0, **kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.beta = beta and root_weight
+        self.root_weight = root_weight
+        self.concat = concat
+        self.dropout = dropout
+        self.edge_dim = in_channels
+
+        self.dropout_module = FairseqDropout(
+                    args.dropout, module_name=self.__class__.__name__
+                )
+
+        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_edge = build_linear(self.dropout, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+
+    def forward(x, edge_index, edge_attr):
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        out = out.view(-1, self.heads * self.out_channels)
+        x_r = self.lin_skip(x[1])
+        beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
+        beta = beta.sigmoid()
+        out = beta * x_r + (1 - beta) * out
+        return out
+    def message(self, x_i, x_j, edge_attr,
+                index: Tensor, ptr: OptTensor,
+                size_i: Optional[int]):
+        query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
+        key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        edge_attr = self.lin_edge(edge_attr).view(-1, self.heads,
+                                                      self.out_channels)
+        key += edge_attr
+        # Attention Mechanism
+        alpha = (query * key).sum(dim=-1) / math.sqrt(self.out_channels)
+        alpha = pyg_utils.softmax(alpha, index, ptr, size_i)
+        alpha = self.dropout_module(alpha)
+
+        out = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
+        out += edge_attr
+        out *= alpha.view(-1, self.heads, 1)
+        return out
+    def __repr__(self):
+        return '{}({}, {}, heads={})'.format(self.__class__.__name__,
+                                             self.in_channels,
+                                             self.out_channels, self.heads)
+
 class UCCAEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
@@ -246,6 +304,10 @@ class UCCAEncoder(nn.Module):
             Model = GraphSage
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
             settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+        elif graph_type == "GraphTransformer":
+            Model = GraphTransformer
+            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         else:
             Model = EdgeConv
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
