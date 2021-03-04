@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+import math
 
 from torch_geometric.nn import MessagePassing
 import torch_geometric.nn as pyg_nn
@@ -225,19 +226,13 @@ class GAT(MessagePassing):
 
 class GraphTransformer(MessagePassing):
     def __init__(self, in_channels, out_channels: int, quant_noise, qn_block_size, args,
-                 heads: int = 1, concat: bool = True, beta: bool = False,
-                 dropout: float = 0.,
-                 bias: bool = True, root_weight: bool = True, **kwargs):
+                 heads: int = 1,**kwargs):
         kwargs.setdefault('aggr', 'add')
-        super(TransformerConv, self).__init__(node_dim=0, **kwargs)
+        super(GraphTransformer, self).__init__(node_dim=0, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.heads = heads
-        self.beta = beta and root_weight
-        self.root_weight = root_weight
-        self.concat = concat
-        self.dropout = dropout
         self.edge_dim = in_channels
 
         self.dropout_module = FairseqDropout(
@@ -247,11 +242,14 @@ class GraphTransformer(MessagePassing):
         self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_edge = build_linear(self.dropout, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_enhanced_value = build_linear(self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.gating_query_value = GatingResidual(self.heads * self.out_channels, quant_noise, qn_block_size, args)
 
-    def forward(x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr):
+        x = (x, x)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
         out = out.view(-1, self.heads * self.out_channels)
         x_r = self.lin_skip(x[1])
@@ -260,8 +258,8 @@ class GraphTransformer(MessagePassing):
         out = beta * x_r + (1 - beta) * out
         return out
     def message(self, x_i, x_j, edge_attr,
-                index: Tensor, ptr: OptTensor,
-                size_i: Optional[int]):
+                index, ptr=None,
+                size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
         edge_attr = self.lin_edge(edge_attr).view(-1, self.heads,
@@ -272,9 +270,14 @@ class GraphTransformer(MessagePassing):
         alpha = pyg_utils.softmax(alpha, index, ptr, size_i)
         alpha = self.dropout_module(alpha)
 
-        out = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
-        out += edge_attr
-        out *= alpha.view(-1, self.heads, 1)
+        value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
+        value += edge_attr
+        query_hat = (value * query).sum(dim=-1) / math.sqrt(self.out_channels)
+        value_enhanced = self.lin_enhanced_value(value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
+        query_hat = query_hat * value_enhanced
+        value_enhanced = self.gating_query_value(query_hat, value)
+        out = value_enhanced * alpha.view(-1, self.heads, 1)
+        
         return out
     def __repr__(self):
         return '{}({}, {}, heads={})'.format(self.__class__.__name__,
@@ -306,8 +309,9 @@ class UCCAEncoder(nn.Module):
             settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
         elif graph_type == "GraphTransformer":
             Model = GraphTransformer
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            head_dim = hidden_dim // 8
+            settings_first = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            settings_else = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         else:
             Model = EdgeConv
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
