@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-import math
 
 from torch_geometric.nn import MessagePassing
 import torch_geometric.nn as pyg_nn
@@ -16,15 +15,12 @@ from fairseq.modules import LayerNorm
 def init_weights(m):
     if type(m) == nn.Linear:
         torch.nn.init.xavier_uniform_(m.weight)
-        if m.bias != None:
-          m.bias.data.fill_(0.01)
+        m.bias.data.fill_(0.01)
     return
 def build_linear(input_dim, output_dim, q_noise, qn_block_size, bias=True):
-    linear = quant_noise(
+    return quant_noise(
             nn.Linear(input_dim, output_dim, bias=bias), p=q_noise, block_size=qn_block_size
         )
-    init_weights(linear)
-    return linear
 class FeedForward(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, quant_noise, qn_block_size, args):
         super().__init__()
@@ -40,6 +36,8 @@ class FeedForward(nn.Module):
         self.activation_dropout_module = FairseqDropout(
             float(activation_dropout_p), module_name=self.__class__.__name__
         )
+        self.fc1.apply(init_weights)
+        self.fc2.apply(init_weights)
     def forward(self, x):
         x = self.phrase_activation_fn(self.fc1(x))
         x = self.activation_dropout_module(x)
@@ -49,8 +47,12 @@ class FeedForward(nn.Module):
 class GatingResidual(nn.Module):
     def __init__(self, embed_dim, quant_noise, qn_block_size, args):
         super().__init__()
-        self.fc1 = build_linear(embed_dim, 1, quant_noise, qn_block_size, False)
-        self.fc_sublayer = build_linear(embed_dim, 1, quant_noise, qn_block_size, False)
+        self.fc1 = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
+        self.fc_sublayer = self.build_ffn(embed_dim, 1, quant_noise, qn_block_size)
+    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size):
+      return quant_noise(
+            nn.Linear(input_dim, output_dim, bias = False), p=q_noise, block_size=qn_block_size
+        )
     def forward(self, x, sublayer):
         alpha = torch.sigmoid(self.fc1(x) + self.fc_sublayer(sublayer))
         x = alpha * x + (1 - alpha) * sublayer
@@ -71,7 +73,9 @@ class SlotAttention(nn.Module):
         nn.init.xavier_uniform_(self.slots_log_sigma)
         self.atten = nn.Parameter(torch.Tensor(self.num_heads, self.dim_head))
         nn.init.xavier_uniform_(self.atten)
-
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
         self.norm_slots = LayerNorm(self.dim_head)
         self.norm_mlp = LayerNorm(self.dim_head)
         
@@ -101,8 +105,9 @@ class SlotAttention(nn.Module):
             q = q * self.dim_head ** -0.5
             alpha = F.leaky_relu((q * self.atten).sum(-1), 0.2)
             alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
+            alpha = self.dropout_module(alpha)
             
-            updates = k * alpha.unsqueeze(-1)
+            updates = slots * alpha.unsqueeze(-1)
             updates = updates.view(-1, self.dim_head * self.num_heads)
 
             slots = self.gru(updates, slots_prev).view(-1, self.num_heads, self.dim_head)
@@ -134,6 +139,8 @@ class GraphSage(MessagePassing):
 
         self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
         self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
+        init_weights(self.lin)
+        init_weights(self.agg_lin)
         if normalize_embedding:
             self.normalize_emb = True
     def forward(self, x, edge_index, x_label):
@@ -158,7 +165,7 @@ class GAT(MessagePassing):
     def __init__(self, in_channels, out_channels, 
                 quant_noise, qn_block_size, args,
                 num_heads=1, concat=True,
-                bias=False, **kwargs):
+                bias=True, **kwargs):
         super(GAT, self).__init__(aggr='add', **kwargs)
 
         self.in_channels = in_channels
@@ -174,21 +181,17 @@ class GAT(MessagePassing):
         self.att = nn.Parameter(torch.Tensor(self.heads, 2 * self.head_dim))
         nn.init.xavier_uniform_(self.att)
 
-        self.dropout_module = FairseqDropout(
-            args.dropout, module_name=self.__class__.__name__
-        )
         if bias and concat:
-            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
         elif bias and not concat:
-            self.bias = nn.Parameter(torch.Tensor(self.out_channels))
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
         else:
             self.register_parameter('bias', None)
-        if bias:
-            nn.init.zeros_(self.bias)
+      
+        nn.init.zeros_(self.bias)
         self.label_linear = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, bias=False)
         self.slot_attn = SlotAttention(self.head_dim, self.in_channels, self.heads, quant_noise, qn_block_size, args)
         self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
-        self.label_ffn_combine = FeedForward(2 * self.out_channels, 2048, self.out_channels, quant_noise, qn_block_size, args)
 
     def forward(self, x, edge_index, x_label, size=None):
         self.x_label = x_label
@@ -196,6 +199,7 @@ class GAT(MessagePassing):
         return self.propagate(edge_index, size=size, x=x)
     def message(self, edge_index_i, x_i, x_j, size_i):
         
+
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
@@ -208,11 +212,7 @@ class GAT(MessagePassing):
 
         alpha = self.dropout_module(alpha)
         edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
-        residual = edge_features
-        edge_out = self.label_linear(edge_features) + x_label
-        edge_out = self.label_ffn_combine(torch.cat([edge_features, edge_out], dim=-1))
-        edge_out = self.dropout_module(edge_out)
-        edge_features = residual + edge_out
+        edge_features = self.label_linear(edge_features) + x_label
         return edge_features
     def update(self, aggr_out):
         if self.concat is True:
@@ -224,70 +224,6 @@ class GAT(MessagePassing):
             aggr_out = aggr_out + self.bias
         return aggr_out
 
-class GraphTransformer(MessagePassing):
-    def __init__(self, in_channels, out_channels: int, quant_noise, qn_block_size, args,
-                 heads: int = 1,**kwargs):
-        kwargs.setdefault('aggr', 'add')
-        super(GraphTransformer, self).__init__(node_dim=0, **kwargs)
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.heads = heads
-        self.edge_dim = in_channels
-
-        self.dropout_module = FairseqDropout(
-                    args.dropout, module_name=self.__class__.__name__
-                )
-
-        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
-        self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_enhanced_value = build_linear(self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
-        self.gating_query_value = GatingResidual(self.heads * self.out_channels, quant_noise, qn_block_size, args)
-
-    def forward(self, x, edge_index, edge_attr):
-        x = (x, x)
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
-        out = out.view(-1, self.heads * self.out_channels)
-        x_r = self.lin_skip(x[1])
-        beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
-        beta = beta.sigmoid()
-        out = beta * x_r + (1 - beta) * out
-        return out
-    def message(self, x_i, x_j, edge_attr,
-                index, ptr=None,
-                size_i=None):
-        query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
-        key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
-        edge_attr = self.lin_edge(edge_attr).view(-1, self.heads,
-                                                      self.out_channels)
-        key += edge_attr
-        # Attention Mechanism
-        alpha = (query * key).sum(dim=-1) / math.sqrt(self.out_channels)
-        alpha = pyg_utils.softmax(alpha, index, ptr, size_i)
-        alpha = self.dropout_module(alpha)
-
-        value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
-        value += edge_attr
-        query_hat = (value * query).sum(dim=-1) / math.sqrt(self.out_channels)
-        query_hat = pyg_utils.softmax(query_hat, index, ptr, size_i)
-        query_hat = self.dropout_module(query_hat)
-        query_hat = query_hat = query * query_hat.view(-1, self.heads, 1)
-
-        value_enhanced = self.lin_enhanced_value(value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
-        query_hat = query_hat * value_enhanced
-        value_enhanced = self.gating_query_value(query_hat.view(-1, self.heads * self.out_channels), value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
-        out = value_enhanced * alpha.view(-1, self.heads, 1)
-
-        return out
-    def __repr__(self):
-        return '{}({}, {}, heads={})'.format(self.__class__.__name__,
-                                             self.in_channels,
-                                             self.out_channels, self.heads)
-
 class UCCAEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
@@ -298,7 +234,7 @@ class UCCAEncoder(nn.Module):
         self.out_dim = out_dim
         self.quant_noise = getattr(args, 'quant_noise_pq', 0)
         self.quant_noise_block_size = getattr(args, 'quant_noise_pq_block_size', 8) or 8
-        self.num_layers = 3 # hard-code
+        self.num_layers = 6 # hard-code
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
@@ -311,11 +247,6 @@ class UCCAEncoder(nn.Module):
             Model = GraphSage
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
             settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-        elif graph_type == "GraphTransformer":
-            Model = GraphTransformer
-            head_dim = hidden_dim // 8
-            settings_first = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-            settings_else = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         else:
             Model = EdgeConv
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
@@ -328,11 +259,9 @@ class UCCAEncoder(nn.Module):
             self.convs.append(Model(*settings_else))
 
         self.ffn = FeedForward(hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru = nn.GRUCell(self.in_dim, self.in_dim)
-        self.gru_ffn = FeedForward(self.in_dim, 2048, self.in_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru_layer_norm = LayerNorm(self.in_dim)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.ffn_layer_norm = LayerNorm(self.hidden_dim)
+        self.gated_convs = GatingResidual(self.hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
 
     def residual_connection(self, x, residual):
         return residual + x
@@ -344,13 +273,12 @@ class UCCAEncoder(nn.Module):
             x = convs(x, edge_index, x_label)
             x = F.relu(x)
             x = self.dropout_module(x)
-            x = self.gru(x, prev_x)
-            x = x + self.gru_ffn(self.gru_layer_norm(x))
+            x = self.residual_connection(x, residual)
         
         residual = x
         x = self.ffn_layer_norm(x)
         x = self.ffn(x)
-        x = self.dropout_module(x)
+	    x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
 
         batch, dim = selected_idx.size(0), x.size(1) 
