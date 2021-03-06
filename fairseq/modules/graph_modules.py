@@ -56,6 +56,27 @@ class GatingResidual(nn.Module):
         x = alpha * x + (1 - alpha) * sublayer
         return x
 
+class ScoreCollections(nn.Module):
+    def __init__(self, num_heads, dim_head, variant):
+        super().__init__()
+        self.num_heads = num_heads
+        self.dim_head = dim_head
+        self.variant = variant
+        if self.variant == "GAT":
+            self.att = nn.Parameter(torch.Tensor(self.num_heads, self.dim_head))
+        elif self.variant == "Transformer":
+            pass
+        
+    def forward(self, x, index, size_i):
+        if self.variant == "GAT":
+            alpha = F.leaky_relu(x.sum(-1), 0.2)
+            alpha = pyg_utils.softmax(alpha, index, num_nodes=size_i)
+        elif self.variant == "Transformer":
+            alpha = x.sum(dim=-1) / math.sqrt(self.dim_head)
+            alpha = pyg_utils.softmax(alpha, index, num_nodes=size_i)
+        return alpha
+
+
 class SlotAttention(nn.Module):
     def __init__(self, in_dim, out_dim, num_heads, quant_noise, qn_block_size, args, epsilon=1e-8):
         super().__init__()
@@ -71,17 +92,14 @@ class SlotAttention(nn.Module):
         nn.init.xavier_uniform_(self.slots_log_sigma)
         self.atten = nn.Parameter(torch.Tensor(self.num_heads, self.dim_head))
         nn.init.xavier_uniform_(self.atten)
-        self.dropout_module = FairseqDropout(
-            args.dropout, module_name=self.__class__.__name__
-        )
 
         self.norm_slots = LayerNorm(self.dim_head)
         self.norm_mlp = LayerNorm(self.dim_head)
         
         
         self.project_q = build_linear(self.dim_head, self.dim_head, quant_noise, qn_block_size, False)
-        self.project_k = build_linear(2*self.dim_head, self.dim_head, quant_noise, qn_block_size, False)
-        self.gru = nn.GRUCell(self.dim_head*num_heads, self.dim_head*num_heads)
+        self.project_k = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
+        self.gru = nn.GRUCell(in_dim*num_heads, in_dim*num_heads)
         
         self.mlp = FeedForward(self.dim_head, self.mlp_hidden_dim, 
                                      self.dim_head, quant_noise,
@@ -104,7 +122,7 @@ class SlotAttention(nn.Module):
             q = q * self.dim_head ** -0.5
             alpha = F.leaky_relu((q * self.atten).sum(-1), 0.2)
             alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
-            alpha = self.dropout_module(alpha)
+            
             updates = k * alpha.unsqueeze(-1)
             updates = updates.view(-1, self.dim_head * self.num_heads)
 
@@ -248,10 +266,10 @@ class GraphTransformer(MessagePassing):
         self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
-        self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
-        self.slot_attn = SlotAttention(self.out_channels, self.out_channels, self.heads, quant_noise, qn_block_size, args)
-
+        self.lin_enhanced_value = build_linear(self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.gating_query_value = GatingResidual(self.heads * self.out_channels, quant_noise, qn_block_size, args)
+        self.attention_qk = ScoreCollections(self.heads, self.out_channels, "GAT")
+        self.attention_vq = ScoreCollections(self.heads, self.out_channels, "GAT")
     def forward(self, x, edge_index, edge_attr):
         x = (x, x)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
@@ -266,29 +284,22 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
-        x_cat = torch.cat([x_i, x_j], dim = -1).view(-1, self.heads, 2 * self.out_channels)
-        extra_edge_attr = self.slot_attn(x_cat, index, size_i).view(-1, self.heads, self.out_channels)
         edge_attr = self.lin_edge(edge_attr).view(-1, self.heads,
                                                       self.out_channels)
-        edge_attr += extra_edge_attr
         key += edge_attr
         # Attention Mechanism
-        alpha = (query * key).sum(dim=-1) / math.sqrt(self.out_channels)
-        alpha = F.leaky_relu(alpha, 0.2)
-        alpha = pyg_utils.softmax(alpha, index, ptr, size_i)
+        alpha = self.attention_qk(query * key, index, size_i)
         alpha = self.dropout_module(alpha)
 
         value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
         value += edge_attr
-        query_hat = (value * query).sum(dim=-1) / math.sqrt(self.out_channels)
-        query_hat = F.leaky_relu(query_hat, 0.2)
-        query_hat = pyg_utils.softmax(query_hat, index, ptr, size_i)
+        query_hat = self.attention_vq(value * query, index, size_i)
         query_hat = self.dropout_module(query_hat)
         query_hat = query * query_hat.view(-1, self.heads, 1)
 
-        value_enhanced = self.lin_enhanced_value(value)
+        value_enhanced = self.lin_enhanced_value(value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
         query_hat = query_hat * value_enhanced
-        value_enhanced = self.gating_query_value(query_hat, value)
+        value_enhanced = self.gating_query_value(query_hat.view(-1, self.heads * self.out_channels), value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
         out = value_enhanced * alpha.view(-1, self.heads, 1)
 
         return out
