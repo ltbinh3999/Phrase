@@ -260,16 +260,15 @@ class GraphTransformer(MessagePassing):
                     args.dropout, module_name=self.__class__.__name__
                 )
 
-        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_enhanced_value = build_linear(self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
-        self.gating_query_value = GatingResidual(self.heads * self.out_channels, quant_noise, qn_block_size, args)
-        self.attention_qk = ScoreCollections(self.heads, self.out_channels, "GAT")
-        self.attention_vq = ScoreCollections(self.heads, self.out_channels, "GAT")
+        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
+        self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
+        self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
+        self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
     def forward(self, x, edge_index, edge_attr):
         x = (x, x)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
@@ -284,8 +283,6 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
-        edge_attr = self.lin_edge(edge_attr).view(-1, self.heads,
-                                                      self.out_channels)
         key += edge_attr
         # Attention Mechanism
         alpha = self.attention_qk(query * key, index, size_i)
@@ -297,9 +294,9 @@ class GraphTransformer(MessagePassing):
         query_hat = self.dropout_module(query_hat)
         query_hat = query * query_hat.view(-1, self.heads, 1)
 
-        value_enhanced = self.lin_enhanced_value(value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
+        value_enhanced = self.lin_enhanced_value(value)
         query_hat = query_hat * value_enhanced
-        value_enhanced = self.gating_query_value(query_hat.view(-1, self.heads * self.out_channels), value.view(-1, self.heads * self.out_channels)).view(-1, self.heads, self.out_channels)
+        value_enhanced = self.gating_query_value(query_hat, value)
         out = value_enhanced * alpha.view(-1, self.heads, 1)
 
         return out
