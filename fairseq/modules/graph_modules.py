@@ -283,6 +283,7 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         key += edge_attr
         # Attention Mechanism
         alpha = self.attention_qk(query * key, index, size_i)
