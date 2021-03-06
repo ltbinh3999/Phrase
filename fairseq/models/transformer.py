@@ -435,8 +435,7 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        x, encoder_embedding = self.forward_embedding(src_tokens, src_edges, src_selected_idx,
-                                 src_labels, token_embeddings)
+        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
         x_graph = x
         batch, dim = src_selected_idx.size(0), x.size(1) 
         x = x.reshape(batch, -1, dim)

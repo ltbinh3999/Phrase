@@ -131,7 +131,7 @@ class TransformerEncoderLayer(nn.Module):
         # START YOUR CODE
         batch, dim = src_selected_idx.size(0), x.size(2) 
         residual = torch.gather(x_graph, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x = (x + residual) / 2
+        x = (x + residual.transpose(0, 1)) / 2
         # END YOUR CODE
         residual = x
         if self.normalize_before:
