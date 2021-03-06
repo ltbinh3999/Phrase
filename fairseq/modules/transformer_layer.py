@@ -103,7 +103,9 @@ class TransformerEncoderLayer(nn.Module):
                     state_dict["{}.{}.{}".format(name, new, m)] = state_dict[k]
                     del state_dict[k]
 
-    def forward(self, x, encoder_padding_mask, attn_mask: Optional[Tensor] = None):
+    def forward(self, x, 
+                x_graph, src_edges, src_selected_idx, src_labels,
+                encoder_padding_mask, attn_mask: Optional[Tensor] = None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -126,7 +128,11 @@ class TransformerEncoderLayer(nn.Module):
         # will become -inf, which results in NaN in model parameters
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
-
+        # START YOUR CODE
+        batch, dim = src_selected_idx.size(0), x.size(2) 
+        residual = torch.gather(x_graph, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        x = (x + residual) / 2
+        # END YOUR CODE
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
@@ -152,7 +158,7 @@ class TransformerEncoderLayer(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-        return x
+        return x, x_graph
 
 
 class TransformerDecoderLayer(nn.Module):

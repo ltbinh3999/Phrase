@@ -378,10 +378,7 @@ class TransformerEncoder(FairseqEncoder):
             self.layer_norm = LayerNorm(embed_dim)
         else:
             self.layer_norm = None
-        # START YOUR CODE
-        self.embed_dim = embed_dim
-        self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
-        # END YOUR CODE
+
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
         if getattr(args, "checkpoint_activations", False):
@@ -389,17 +386,13 @@ class TransformerEncoder(FairseqEncoder):
         return layer
 
     def forward_embedding(
-        self, src_tokens, src_edges, src_selected_idx,
-        src_labels, token_embedding: Optional[torch.Tensor] = None,
+        self, src_tokens, token_embedding: Optional[torch.Tensor] = None,
     ):
         # embed tokens and positions
         if token_embedding is None:
             token_embedding = self.embed_tokens(src_tokens)
         x = embed = self.embed_scale * token_embedding
-        # START YOUR CODE
-        batch, seql, dim = x.shape 
-        x = self.graph_encode(x.reshape(batch * seql, dim), src_edges, src_selected_idx, src_labels)
-        # END YOUR CODE
+
         if self.embed_positions is not None:
             x = embed + self.embed_positions(src_tokens)
         if self.layernorm_embedding is not None:
@@ -444,7 +437,10 @@ class TransformerEncoder(FairseqEncoder):
         """
         x, encoder_embedding = self.forward_embedding(src_tokens, src_edges, src_selected_idx,
                                  src_labels, token_embeddings)
-
+        x_graph = x
+        batch, dim = src_selected_idx.size(0), x.size(1) 
+        x = x.reshape(batch, -1, dim)
+        x = torch.gather(x, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
@@ -455,7 +451,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x = layer(x, encoder_padding_mask)
+            x, x_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
