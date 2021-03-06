@@ -402,7 +402,7 @@ class TransformerEncoder(FairseqEncoder):
         src_tokens = torch.gather(src_tokens, 1, selected_idx)
         # END YOUR CODE
         if self.embed_positions is not None:
-            x = embed + self.embed_positions(src_tokens)
+            x = x + self.embed_positions(src_tokens)
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
         x = self.dropout_module(x)
