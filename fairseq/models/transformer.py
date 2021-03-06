@@ -399,6 +399,7 @@ class TransformerEncoder(FairseqEncoder):
         # START YOUR CODE
         batch, seql, dim = x.shape 
         x = self.graph_encode(x.reshape(batch * seql, dim), src_edges, src_selected_idx, src_labels)
+        src_tokens = torch.gather(src_tokens, 1, selected_idx)
         # END YOUR CODE
         if self.embed_positions is not None:
             x = embed + self.embed_positions(src_tokens)
@@ -407,7 +408,7 @@ class TransformerEncoder(FairseqEncoder):
         x = self.dropout_module(x)
         if self.quant_noise is not None:
             x = self.quant_noise(x)
-        return x, embed
+        return x, embed, src_tokens
 
     def forward(
         self,
@@ -442,9 +443,9 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        x, encoder_embedding = self.forward_embedding(src_tokens, src_edges, src_selected_idx,
+        x, encoder_embedding, src_tokens = self.forward_embedding(src_tokens, src_edges, src_selected_idx,
                                  src_labels, token_embeddings)
-
+        assert x.size(1) == src_selected_idx.size(1) == src_tokens.size(1)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
