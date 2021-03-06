@@ -436,13 +436,14 @@ class TransformerEncoder(FairseqEncoder):
                   Only populated if *return_all_hiddens* is True.
         """
         x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
+        batch, dim = src_selected_idx.size(0), x.size(2)
+        src_tokens = torch.gather(src_tokens, 1, src_selected_idx)
+        encoder_embedding = torch.gather(encoder_embedding, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         x_graph = x
-        batch, dim = src_selected_idx.size(0), x.size(1) 
         x = x.reshape(batch, -1, dim)
         x = torch.gather(x, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
-
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
 
