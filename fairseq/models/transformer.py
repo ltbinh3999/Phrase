@@ -399,7 +399,7 @@ class TransformerEncoder(FairseqEncoder):
         # START YOUR CODE
         batch, seql, dim = x.shape 
         x = self.graph_encode(x.reshape(batch * seql, dim), src_edges, src_selected_idx, src_labels)
-        src_tokens = torch.gather(src_tokens, 1, selected_idx)
+        src_tokens = torch.gather(src_tokens, 1, src_selected_idx)
         # END YOUR CODE
         if self.embed_positions is not None:
             x = x + self.embed_positions(src_tokens)
