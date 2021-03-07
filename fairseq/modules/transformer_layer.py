@@ -178,12 +178,12 @@ class TransformerEncoderLayer(nn.Module):
         residual_graph = residual_graph.transpose(0, 1)
         residual_graph = self.dropout_module(residual_graph)
 
-        x_out = self.graph_attn(
+        x_out, _ = self.graph_attn(
                         query=x,
                         key=residual_graph,
                         value=residual_graph
                         )
-        x = self.attentive_combining_ffw(torch.cat([x, x_out]), dim=-1)
+        x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)
         x = self.gated_residual(x, residual_graph)
         # END YOUR CODE
