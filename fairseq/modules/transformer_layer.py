@@ -136,8 +136,8 @@ class TransformerEncoderLayer(nn.Module):
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
         # START YOUR CODE
         x_graph = self.graph_encode(x_graph, src_edges, src_labels)
-        batch, dim = x.size(0), x.size(2) 
-        residual = torch.gather(x_graph, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        batch, dim = x.size(1), x.size(2) 
+        residual = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         x = (x + residual.transpose(0, 1)) / 2
         # END YOUR CODE
         residual = x

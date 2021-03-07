@@ -343,7 +343,7 @@ class UCCAEncoder(nn.Module):
 
     def residual_connection(self, x, residual):
         return residual + x
-    def forward(self, x, edge_index, edge_label):
+    def forward(self, x, edge_index, x_label):
         residual = x
         x = self.convs_layer_norm(x)
         x = self.convs(x, edge_index, x_label)
