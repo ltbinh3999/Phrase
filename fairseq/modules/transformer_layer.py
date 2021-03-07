@@ -14,7 +14,7 @@ from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor
 
 # START YOUR CODE
-from fairseq.modules.graph_modules import UCCAEncoder
+from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual
 # END YOUR CODE
 
 class TransformerEncoderLayer(nn.Module):
@@ -70,6 +70,8 @@ class TransformerEncoderLayer(nn.Module):
         self.final_layer_norm = LayerNorm(self.embed_dim)
         # START YOUR CODE
         self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
+        self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
+            self.quant_noise_block_size, args)
         # END YOUR CODE
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
@@ -110,7 +112,7 @@ class TransformerEncoderLayer(nn.Module):
                     del state_dict[k]
 
     def forward(self, x, 
-                x_graph, src_edges, src_selected_idx, src_labels,
+                x_graph, src_edges, src_selected_idx, src_labels, embed_pos,
                 encoder_padding_mask, attn_mask: Optional[Tensor] = None):
         """
         Args:
@@ -134,7 +136,6 @@ class TransformerEncoderLayer(nn.Module):
         # will become -inf, which results in NaN in model parameters
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
-
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
@@ -147,15 +148,15 @@ class TransformerEncoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
+        if not self.normalize_before:
+            x = self.self_attn_layer_norm(x)
         # START YOUR CODE
         x_graph = self.graph_encode(x_graph, src_edges, src_labels)
         batch, dim = x.size(1), x.size(2) 
-        residual = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x = (x + residual.transpose(0, 1)) / 2
+        residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        residual_graph += embed_pos
+        x = self.gated_residual(x, residual_graph)
         # END YOUR CODE
-        if not self.normalize_before:
-            x = self.self_attn_layer_norm(x)
-
         residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)

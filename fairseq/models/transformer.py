@@ -386,21 +386,33 @@ class TransformerEncoder(FairseqEncoder):
         return layer
 
     def forward_embedding(
-        self, src_tokens, token_embedding: Optional[torch.Tensor] = None,
+        self, src_tokens, src_selected_idx, token_embedding: Optional[torch.Tensor] = None,
     ):
         # embed tokens and positions
         if token_embedding is None:
             token_embedding = self.embed_tokens(src_tokens)
-        x = embed = self.embed_scale * token_embedding
-
+            batch, seql, dim = token_embedding.shape
+            src_tokens = torch.gather(src_tokens, 1, src_selected_idx)
+            x = torch.gather(token_embedding, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+            x_graph = token_embedding
+        x = embed = self.embed_scale * x
+        x_graph = self.embed_scale * x_graph
         if self.embed_positions is not None:
-            x = embed + self.embed_positions(src_tokens)
+            embed_pos = self.embed_positions(src_tokens)
+            x = x + embed_pos
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
+            x_graph = self.layernorm_embedding(x_graph)
+            embed_pos = self.layernorm_embedding(embed_pos)
         x = self.dropout_module(x)
+        x_graph = self.dropout_module(x_graph)
+        embed_pos = self.dropout_module(embed_pos)
         if self.quant_noise is not None:
             x = self.quant_noise(x)
-        return x, embed
+            x_graph = self.quant_noise(x_graph)
+            embed_pos = self.quant_noise(embed_pos)
+        x_graph = x_graph.reshape(batch * seql, dim)
+        return x, embed, x_graph, embed_pos, src_tokens
 
     def forward(
         self,
@@ -435,13 +447,11 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
-        batch, seql, dim = x.shape
-        src_tokens = torch.gather(src_tokens, 1, src_selected_idx)
-        encoder_embedding = torch.gather(encoder_embedding, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x_graph = x.reshape(batch * seql, dim)
-        x = torch.gather(x, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        src_labels = self.label_embedding(src_labels)
+        x, encoder_embedding, x_graph, embed_pos, src_tokens = self.forward_embedding(src_tokens, src_selected_idx, token_embeddings)
+        src_labels = self.layernorm_embedding(self.label_embedding(src_labels))
+        src_labels = self.dropout_module(src_labels)
+        if self.quant_noise is not None:
+            src_labels = self.quant_noise(src_labels)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
         # compute padding mask
@@ -451,7 +461,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, encoder_padding_mask)
+            x, x_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)

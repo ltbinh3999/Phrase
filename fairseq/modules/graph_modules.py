@@ -336,25 +336,14 @@ class UCCAEncoder(nn.Module):
 
         
         self.convs = Model(*settings_first)
-
-        self.ffn = FeedForward(hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
         self.convs_layer_norm = LayerNorm(self.in_dim)
-        self.ffn_layer_norm = LayerNorm(self.hidden_dim)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
-        residual = x
         x = self.convs_layer_norm(x)
         x = self.convs(x, edge_index, x_label)
         x = F.relu(x)
         x = self.dropout_module(x)
-        x = self.residual_connection(x, residual)
-        
-        residual = x
-        x = self.ffn_layer_norm(x)
-        x = self.ffn(x)
-        x = self.dropout_module(x)
-        x = self.residual_connection(x, residual)
 
         return x
