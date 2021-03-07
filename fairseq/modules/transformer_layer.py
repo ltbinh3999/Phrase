@@ -14,7 +14,7 @@ from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor
 
 # START YOUR CODE
-from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual
+from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual, FeedForward
 # END YOUR CODE
 
 class TransformerEncoderLayer(nn.Module):
@@ -72,6 +72,13 @@ class TransformerEncoderLayer(nn.Module):
         self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
         self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
             self.quant_noise_block_size, args)
+        self.graph_attn = self.build_graph_attention(self.embed_dim, args)
+        self.attentive_combining_ffw = FeedForward(self.embed_dim*2, 
+                                                    2048, 
+                                                    self.embed_dim, 
+                                                    self.quant_noise, 
+                                                    self.quant_noise_block_size,
+                                                    args)
         # END YOUR CODE
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
@@ -83,7 +90,19 @@ class TransformerEncoderLayer(nn.Module):
         return quant_noise(
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
         )
-
+    # START YOUR CODE
+    def build_graph_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.encoder_attention_heads,
+            kdim=self.embed_dim,
+            vdim=self.embed_dim,
+            dropout=args.attention_dropout,
+            self_attention=False,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+    # END YOUR CODE
     def build_self_attention(self, embed_dim, args):
         return MultiheadAttention(
             embed_dim,
@@ -151,13 +170,24 @@ class TransformerEncoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
         # START YOUR CODE
+        residual = x
         x_graph = self.graph_encode(x_graph, src_edges, src_labels)
         batch, dim = x.size(1), x.size(2) 
         residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         residual_graph += embed_pos
+        residual_graph = residual_graph.transpose(0, 1)
+        residual_graph = self.dropout_module(residual_graph)
+
+        x_out = self.graph_attn(
+                        query=x,
+                        key=residual_graph,
+                        value=residual_graph
+                        )
+        x = self.attentive_combining_ffw(torch.cat([x, x_out]), dim=-1)
+        x = self.dropout_module(x)
         x = self.gated_residual(x, residual_graph)
         # END YOUR CODE
-        residual = x
+        #residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
         x = self.activation_fn(self.fc1(x))

@@ -343,7 +343,4 @@ class UCCAEncoder(nn.Module):
     def forward(self, x, edge_index, x_label):
         x = self.convs_layer_norm(x)
         x = self.convs(x, edge_index, x_label)
-        x = F.relu(x)
-        x = self.dropout_module(x)
-
         return x

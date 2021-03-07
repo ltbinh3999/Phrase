@@ -448,7 +448,7 @@ class TransformerEncoder(FairseqEncoder):
                   Only populated if *return_all_hiddens* is True.
         """
         x, encoder_embedding, x_graph, embed_pos, src_tokens = self.forward_embedding(src_tokens, src_selected_idx, token_embeddings)
-        src_labels = self.layernorm_embedding(self.label_embedding(src_labels))
+        src_labels = self.label_embedding(src_labels)
         src_labels = self.dropout_module(src_labels)
         if self.quant_noise is not None:
             src_labels = self.quant_noise(src_labels)
