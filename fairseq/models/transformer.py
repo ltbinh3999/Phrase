@@ -30,10 +30,6 @@ from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
 
-# START YOUR CODE
-from fairseq.modules.graph_modules import UCCAEncoder
-# END YOUR CODE
-
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -378,7 +374,11 @@ class TransformerEncoder(FairseqEncoder):
             self.layer_norm = LayerNorm(embed_dim)
         else:
             self.layer_norm = None
+        # START YOUR CODE
 
+        self.label_embedding = nn.Embedding(13, embed_dim)
+        nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
+        # END YOUR CODE
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
         if getattr(args, "checkpoint_activations", False):
@@ -436,12 +436,12 @@ class TransformerEncoder(FairseqEncoder):
                   Only populated if *return_all_hiddens* is True.
         """
         x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
-        batch, dim = src_selected_idx.size(0), x.size(2)
+        batch, seql, dim = x.shape
         src_tokens = torch.gather(src_tokens, 1, src_selected_idx)
         encoder_embedding = torch.gather(encoder_embedding, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x_graph = x
-        x = x.reshape(batch, -1, dim)
+        x_graph = x.reshape(batch * seql, dim)
         x = torch.gather(x, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        src_labels = self.label_embedding(src_labels)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
         # compute padding mask

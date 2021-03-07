@@ -309,8 +309,7 @@ class GraphTransformer(MessagePassing):
 class UCCAEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args):
         super(UCCAEncoder, self).__init__()
-        self.label_embedding = nn.Embedding(13, in_dim)
-        nn.init.normal_(self.label_embedding.weight, mean=0, std=in_dim ** -0.5)
+        
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.out_dim = out_dim
@@ -324,46 +323,33 @@ class UCCAEncoder(nn.Module):
         if graph_type == "GAT":
             Model = GAT
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         elif graph_type == "GraphSage":
             Model = GraphSage
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
         elif graph_type == "GraphTransformer":
             Model = GraphTransformer
             head_dim = hidden_dim // 8
             settings_first = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
-            settings_else = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         else:
             Model = EdgeConv
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-            settings_else = (hidden_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
 
         
-        self.convs = nn.ModuleList()
-        self.convs.append(Model(*settings_first))
-        for i in range(self.num_layers-1):
-            self.convs.append(Model(*settings_else))
+        self.convs = Model(*settings_first)
 
         self.ffn = FeedForward(hidden_dim, 2048, out_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru = nn.GRUCell(self.in_dim, self.in_dim)
-        self.gru_ffn = FeedForward(self.in_dim, 2048, self.in_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru_layer_norm = LayerNorm(self.in_dim)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.ffn_layer_norm = LayerNorm(self.hidden_dim)
 
     def residual_connection(self, x, residual):
         return residual + x
-    def forward(self, x, edge_index, selected_idx, edge_label):
-        x_label = self.label_embedding(edge_label)
-        for convs in self.convs:
-            prev_x = x
-            x = self.convs_layer_norm(x)
-            x = convs(x, edge_index, x_label)
-            x = F.relu(x)
-            x = self.dropout_module(x)
-            x = self.gru(x, prev_x)
-            x = x + self.gru_ffn(self.gru_layer_norm(x))
+    def forward(self, x, edge_index, edge_label):
+        residual = x
+        x = self.convs_layer_norm(x)
+        x = self.convs(x, edge_index, x_label)
+        x = F.relu(x)
+        x = self.dropout_module(x)
+        x = self.residual_connection(x, residual)
         
         residual = x
         x = self.ffn_layer_norm(x)
@@ -371,7 +357,4 @@ class UCCAEncoder(nn.Module):
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
 
-        batch, dim = selected_idx.size(0), x.size(1) 
-        x = x.reshape(batch, -1, dim)
-        x = torch.gather(x, 1, selected_idx.unsqueeze(-1).repeat(1,1,dim))
         return x

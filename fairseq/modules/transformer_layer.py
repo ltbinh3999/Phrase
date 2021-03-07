@@ -13,6 +13,9 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor
 
+# START YOUR CODE
+from fairseq.modules.graph_modules import UCCAEncoder
+# END YOUR CODE
 
 class TransformerEncoderLayer(nn.Module):
     """Encoder layer block.
@@ -65,6 +68,9 @@ class TransformerEncoderLayer(nn.Module):
         )
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
+        # START YOUR CODE
+        self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
+        # END YOUR CODE
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(
@@ -129,7 +135,8 @@ class TransformerEncoderLayer(nn.Module):
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
         # START YOUR CODE
-        batch, dim = src_selected_idx.size(0), x.size(2) 
+        x_graph = self.graph_encode(x_graph, src_edges, src_labels)
+        batch, dim = x.size(0), x.size(2) 
         residual = torch.gather(x_graph, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         x = (x + residual.transpose(0, 1)) / 2
         # END YOUR CODE
