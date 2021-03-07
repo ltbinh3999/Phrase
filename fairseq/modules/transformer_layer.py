@@ -134,12 +134,7 @@ class TransformerEncoderLayer(nn.Module):
         # will become -inf, which results in NaN in model parameters
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
-        # START YOUR CODE
-        x_graph = self.graph_encode(x_graph, src_edges, src_labels)
-        batch, dim = x.size(1), x.size(2) 
-        residual = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x = (x + residual.transpose(0, 1)) / 2
-        # END YOUR CODE
+
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
@@ -152,6 +147,12 @@ class TransformerEncoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
+        # START YOUR CODE
+        x_graph = self.graph_encode(x_graph, src_edges, src_labels)
+        batch, dim = x.size(1), x.size(2) 
+        residual = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        x = (x + residual.transpose(0, 1)) / 2
+        # END YOUR CODE
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
 
