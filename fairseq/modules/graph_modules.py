@@ -90,15 +90,17 @@ class SlotAttention(nn.Module):
         self.slots_log_sigma = nn.Parameter(torch.Tensor(1, 1, self.dim_head))
         nn.init.xavier_uniform_(self.slots_mu)
         nn.init.xavier_uniform_(self.slots_log_sigma)
-        self.atten = nn.Parameter(torch.Tensor(self.num_heads, self.dim_head))
-        nn.init.xavier_uniform_(self.atten)
-
+        self.atten = ScoreCollections(self.num_heads, self.dim_head, "Transformer")
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
         self.norm_slots = LayerNorm(self.dim_head)
         self.norm_mlp = LayerNorm(self.dim_head)
         
         
         self.project_q = build_linear(self.dim_head, self.dim_head, quant_noise, qn_block_size, False)
         self.project_k = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
+        self.project_v = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
         self.gru = nn.GRUCell(in_dim*num_heads, in_dim*num_heads)
         
         self.mlp = FeedForward(self.dim_head, self.mlp_hidden_dim, 
@@ -112,6 +114,8 @@ class SlotAttention(nn.Module):
 
         k = self.project_k(x) #Shape: [N, num_heads, embed_dim]
         k = k * self.dim_head ** -0.5
+        v = self.project_v(x) #Shape: [N, num_heads, embed_dim]
+        v = v * self.dim_head ** -0.5
 
         # Shape: [N, num_labels, slot_dim]
         for _ in range(self.num_iter):
@@ -120,9 +124,8 @@ class SlotAttention(nn.Module):
             
             q = self.project_q(slots)
             q = q * self.dim_head ** -0.5
-            alpha = F.leaky_relu((q * self.atten).sum(-1), 0.2)
-            alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
-            
+            alpha = self.atten(q * k, , edge_index_i, size_i)
+            alpha = self.dropout_module(alpha)
             updates = k * alpha.unsqueeze(-1)
             updates = updates.view(-1, self.dim_head * self.num_heads)
 
@@ -265,31 +268,50 @@ class GraphTransformer(MessagePassing):
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
+        self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
         self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
+        self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
+        self.slot_attn = SlotAttention(self.out_channels, self.in_channels, self.heads, quant_noise, qn_block_size, args)
+        self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
     def forward(self, x, edge_index, edge_attr):
         x = (x, x)
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        out, edge_attr = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
         out = out.view(-1, self.heads * self.out_channels)
         x_r = self.lin_skip(x[1])
         beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
         beta = beta.sigmoid()
         out = beta * x_r + (1 - beta) * out
-        return out
+        return out, edge_attr
     def message(self, x_i, x_j, edge_attr,
                 index, ptr=None,
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        x_cat = torch.cat([query, key], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
+
+        label_attn = self.slot_attn(x_cat, index, size_i)
+        label_attn = self.dropout_module(label_attn)
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
+        edge_attr = self.gating_label(label_attn, edge_attr)
+        
         key += edge_attr
         # Attention Mechanism
         alpha = self.attention_qk(query * key, index, size_i)
         alpha = self.dropout_module(alpha)
 
         value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
-        out = value * alpha.view(-1, self.heads, 1)
+        value += edge_attr
+        query_hat = self.attention_vq(value * query, index, size_i)
+        query_hat = self.dropout_module(query_hat)
+        query_hat = query * query_hat.view(-1, self.heads, 1)
 
-        return out
+        value_enhanced = self.lin_enhanced_value(value)
+        query_hat = query_hat * value_enhanced
+        value_enhanced = self.gating_query_value(query_hat, value)
+        out = value_enhanced * alpha.view(-1, self.heads, 1)
+
+        return out, edge_attr
     def __repr__(self):
         return '{}({}, {}, heads={})'.format(self.__class__.__name__,
                                              self.in_channels,
@@ -335,5 +357,5 @@ class UCCAEncoder(nn.Module):
         x_label = self.convs_layer_norm(x_label)
         x_label = self.lin_label(x_label)
         x_label = self.dropout_module(x_label)
-        x = self.convs(x, edge_index, x_label)
+        x, x_label = self.convs(x, edge_index, x_label)
         return x, x_label
