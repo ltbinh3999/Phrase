@@ -265,10 +265,7 @@ class GraphTransformer(MessagePassing):
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
-        self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
         self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
-        self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
     def forward(self, x, edge_index, edge_attr):
         x = (x, x)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
