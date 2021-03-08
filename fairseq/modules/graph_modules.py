@@ -290,15 +290,7 @@ class GraphTransformer(MessagePassing):
         alpha = self.dropout_module(alpha)
 
         value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
-        value += edge_attr
-        query_hat = self.attention_vq(value * query, index, size_i)
-        query_hat = self.dropout_module(query_hat)
-        query_hat = query * query_hat.view(-1, self.heads, 1)
-
-        value_enhanced = self.lin_enhanced_value(value)
-        query_hat = query_hat * value_enhanced
-        value_enhanced = self.gating_query_value(query_hat, value)
-        out = value_enhanced * alpha.view(-1, self.heads, 1)
+        out = value * alpha.view(-1, self.heads, 1)
 
         return out
     def __repr__(self):
