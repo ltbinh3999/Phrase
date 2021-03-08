@@ -124,7 +124,7 @@ class SlotAttention(nn.Module):
             
             q = self.project_q(slots)
             q = q * self.dim_head ** -0.5
-            alpha = self.atten(q * k, , edge_index_i, size_i)
+            alpha = self.atten(q * k, edge_index_i, size_i)
             alpha = self.dropout_module(alpha)
             updates = k * alpha.unsqueeze(-1)
             updates = updates.view(-1, self.dim_head * self.num_heads)
@@ -132,7 +132,7 @@ class SlotAttention(nn.Module):
             slots = self.gru(updates, slots_prev).view(-1, self.num_heads, self.dim_head)
             
             slots = slots + self.mlp(self.norm_mlp(slots))
-        return slots.view(-1, self.num_heads * self.dim_head)
+        return slots
 
 
 class EdgeConv(MessagePassing):
@@ -273,15 +273,16 @@ class GraphTransformer(MessagePassing):
         self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
         self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
         self.slot_attn = SlotAttention(self.out_channels, self.in_channels, self.heads, quant_noise, qn_block_size, args)
-        self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
+        self.gating_label = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
     def forward(self, x, edge_index, edge_attr):
         x = (x, x)
-        out, edge_attr = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
         out = out.view(-1, self.heads * self.out_channels)
         x_r = self.lin_skip(x[1])
         beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
         beta = beta.sigmoid()
         out = beta * x_r + (1 - beta) * out
+        edge_attr = self.edge_attr.view(-1, self.heads * self.out_channels)
         return out, edge_attr
     def message(self, x_i, x_j, edge_attr,
                 index, ptr=None,
@@ -294,7 +295,7 @@ class GraphTransformer(MessagePassing):
         label_attn = self.dropout_module(label_attn)
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         edge_attr = self.gating_label(label_attn, edge_attr)
-        
+        self.edge_attr = edge_attr
         key += edge_attr
         # Attention Mechanism
         alpha = self.attention_qk(query * key, index, size_i)
@@ -311,7 +312,7 @@ class GraphTransformer(MessagePassing):
         value_enhanced = self.gating_query_value(query_hat, value)
         out = value_enhanced * alpha.view(-1, self.heads, 1)
 
-        return out, edge_attr
+        return out
     def __repr__(self):
         return '{}({}, {}, heads={})'.format(self.__class__.__name__,
                                              self.in_channels,
