@@ -449,6 +449,7 @@ class TransformerEncoder(FairseqEncoder):
         """
         x, encoder_embedding, x_graph, embed_pos, src_tokens = self.forward_embedding(src_tokens, src_selected_idx, token_embeddings)
         src_labels = self.label_embedding(src_labels)
+        src_labels = self.embed_scale * src_labels
         src_labels = self.dropout_module(src_labels)
         if self.quant_noise is not None:
             src_labels = self.quant_noise(src_labels)
@@ -461,7 +462,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
+            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
