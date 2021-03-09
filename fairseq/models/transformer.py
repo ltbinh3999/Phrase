@@ -540,7 +540,7 @@ class TransformerEncoder(FairseqEncoder):
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": src_tokens,  # B x T
             "src_lengths": src_lengths,  # B x 1
-            "encoder_transparent_attention": encoder_transparent_attention
+            "transparent_attention": encoder_transparent_attention
         }
 
     def max_positions(self):
@@ -861,7 +861,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_padding_mask=self_attn_padding_mask,
                 need_attn=bool((idx == alignment_layer)),
                 need_head_weights=bool((idx == alignment_layer)),
-                encoder_transparent_attention=encoder_out["encoder_transparent_attention"]
+                encoder_transparent_attention=encoder_out["transparent_attention"]
             )
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:

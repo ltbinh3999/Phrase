@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from fairseq import utils
 from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
@@ -448,7 +449,7 @@ class TransformerDecoderLayer(nn.Module):
         
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)
-        x = self.context_residual(phrase_residual, x)
+        x = self.context_residual(residual, x)
         # END YOUR CODE
 
         if not self.normalize_before:
