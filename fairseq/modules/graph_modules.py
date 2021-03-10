@@ -334,30 +334,17 @@ class UCCAEncoder(nn.Module):
             Model = EdgeConv
             settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
 
-        self.convs = nn.ModuleList()
-        for i in range(self.num_layers):
-            self.convs.append(Model(*settings_first))
         
+        self.convs = Model(*settings_first)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
-        self.gru = nn.GRUCell(self.in_dim, self.in_dim)
-        self.gru_ffn = FeedForward(self.in_dim, 2048, self.in_dim, self.quant_noise, self.quant_noise_block_size, args)
-        self.gru_layer_norm = LayerNorm(self.in_dim)
-        self.ffn_layer_norm = LayerNorm(self.hidden_dim)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
-        for convs in self.convs:
-            residual = x
-            x = self.convs_layer_norm(x)
-            x_label = self.convs_layer_norm(x_label)
-            x_label = self.lin_label(x_label)
-            x_label = self.dropout_module(x_label)
-            x = convs(x, edge_index, x_label)
-            x = F.relu(x)
-            x = self.dropout_module(x)
-            x = self.gru(x, residual)
-            x = x + self.gru_ffn(self.gru_layer_norm(x))
-        
+        x = self.convs_layer_norm(x)
+        x_label = self.convs_layer_norm(x_label)
+        x_label = self.lin_label(x_label)
+        x_label = self.dropout_module(x_label)
+        x = self.convs(x, edge_index, x_label)
         return x, x_label

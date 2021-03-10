@@ -29,7 +29,7 @@ from fairseq.modules import (
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
-from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual, FeedForward
+
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -375,9 +375,9 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layer_norm = None
         # START YOUR CODE
+
         self.label_embedding = nn.Embedding(13, embed_dim)
         nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
-        self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args)
         # END YOUR CODE
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
@@ -453,21 +453,21 @@ class TransformerEncoder(FairseqEncoder):
         src_labels = self.dropout_module(src_labels)
         if self.quant_noise is not None:
             src_labels = self.quant_noise(src_labels)
-        x_graph, x_label = self.graph_encode(x_graph, src_edges, src_labels)
-        batch, dim = x.size(0), x.size(2)
-        x_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        x_graph += embed_pos
-        x_graph = self.dropout_module(x_graph).transpose(0, 1)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
 
         encoder_states = []
+        batch, dim = x.size(1), x.size(2) 
+        transparent_attention = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim)).unsqueeze(0)
 
         # encoder layers
         for layer in self.layers:
-            x = layer(x, x_graph, encoder_padding_mask)
+            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
+            transparent_attention = torch.cat([transparent_attention, 
+                torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim)).unsqueeze(0)], 
+                dim=0)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
@@ -486,6 +486,7 @@ class TransformerEncoder(FairseqEncoder):
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": [],
             "src_lengths": [],
+            "transparent_attention": transparent_attention
         }
 
     @torch.jit.export
@@ -531,7 +532,7 @@ class TransformerEncoder(FairseqEncoder):
         if len(encoder_states) > 0:
             for idx, state in enumerate(encoder_states):
                 encoder_states[idx] = state.index_select(1, new_order)
-
+        encoder_transparent_attention = encoder_out["transparent_attention"].index_select(2, new_order)
         return {
             "encoder_out": new_encoder_out,  # T x B x C
             "encoder_padding_mask": new_encoder_padding_mask,  # B x T
@@ -539,6 +540,7 @@ class TransformerEncoder(FairseqEncoder):
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": src_tokens,  # B x T
             "src_lengths": src_lengths,  # B x 1
+            "transparent_attention": encoder_transparent_attention
         }
 
     def max_positions(self):
@@ -859,6 +861,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_padding_mask=self_attn_padding_mask,
                 need_attn=bool((idx == alignment_layer)),
                 need_head_weights=bool((idx == alignment_layer)),
+                encoder_transparent_attention=encoder_out["transparent_attention"]
             )
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
