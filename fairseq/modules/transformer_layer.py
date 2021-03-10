@@ -434,12 +434,14 @@ class TransformerDecoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
+        if not self.normalize_before:
+            x = self.self_attn_layer_norm(x)
         # START YOUR CODE
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
-            encoder_transparent_attention = self.self_attn_layer_norm(encoder_transparent_attention)
-        
+
+        encoder_transparent_attention = self.self_attn_layer_norm(encoder_transparent_attention)
         score = F.softmax(self.W_transparent, dim=0)
         encoder_layer, bz, total_phrase, embed_size = encoder_transparent_attention.shape
         encoder_transparent_attention = torch.matmul(score.T, encoder_transparent_attention.reshape(encoder_layer,-1))\
@@ -454,10 +456,9 @@ class TransformerDecoderLayer(nn.Module):
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)
         x = self.context_residual(residual, x)
-        # END YOUR CODE
-
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
+        # END YOUR CODE      
 
         if self.encoder_attn is not None and encoder_out is not None:
             residual = x
