@@ -29,7 +29,7 @@ from fairseq.modules import (
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
-
+from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual, FeedForward
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -377,7 +377,7 @@ class TransformerEncoder(FairseqEncoder):
         # START YOUR CODE
         self.label_embedding = nn.Embedding(13, embed_dim)
         nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
-        self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
+        self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args)
         # END YOUR CODE
     def build_encoder_layer(self, args):
         layer = TransformerEncoderLayer(args)
@@ -453,9 +453,9 @@ class TransformerEncoder(FairseqEncoder):
         src_labels = self.dropout_module(src_labels)
         if self.quant_noise is not None:
             src_labels = self.quant_noise(src_labels)
-        x_graph, x_label = self.graph_encode(x_graph, src_selected_idx, src_tokens)
-        dim = x.size(2)
-        x_graph = torch.gather(x_graph, 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        x_graph, x_label = self.graph_encode(x_graph, src_edges, src_labels)
+        batch, dim = x.size(0), x.size(2)
+        x_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         x_graph += embed_pos
         x_graph = self.dropout_module(x_graph).transpose(0, 1)
         # B x T x C -> T x B x C
