@@ -460,14 +460,15 @@ class TransformerEncoder(FairseqEncoder):
 
         encoder_states = []
         batch, dim = x.size(1), x.size(2) 
-        transparent_attention = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim)).unsqueeze(0)
+        transparent_attention = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        transparent_attention += embed_pos
+        transparent_attention = self.dropout_module(transparent_attention)
+        transparent_attention = transparent_attention.transpose(0, 1).unsqueeze(0)
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
-            transparent_attention = torch.cat([transparent_attention, 
-                torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim)).unsqueeze(0)], 
-                dim=0)
+            x, x_graph, src_labels, TA_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
+            transparent_attention = torch.cat([transparent_attention, TA_graph.unsqueeze(0)], dim=0)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
