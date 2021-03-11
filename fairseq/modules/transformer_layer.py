@@ -192,7 +192,7 @@ class TransformerEncoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
         # END YOUR CODE
-        residual = x
+        #residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
         x = self.activation_fn(self.fc1(x))
@@ -461,7 +461,7 @@ class TransformerDecoderLayer(nn.Module):
         # END YOUR CODE      
 
         if self.encoder_attn is not None and encoder_out is not None:
-            residual = x
+            #residual = x
             if self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
             if prev_attn_state is not None:
