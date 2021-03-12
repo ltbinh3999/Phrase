@@ -95,12 +95,17 @@ class SlotAttention(nn.Module):
             args.dropout, module_name=self.__class__.__name__
         )
         self.norm_slots = LayerNorm(self.dim_head)
+        self.norm_mlp = LayerNorm(self.dim_head)
         
         
         self.project_q = build_linear(self.dim_head, self.dim_head, quant_noise, qn_block_size, False)
         self.project_k = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
         self.project_v = build_linear(2*in_dim, self.dim_head, quant_noise, qn_block_size, False)
-        self.gated_residual = GatingResidual(self.dim_head, quant_noise, qn_block_size, args)
+        self.gru = nn.GRUCell(in_dim*num_heads, in_dim*num_heads)
+        
+        self.mlp = FeedForward(self.dim_head, self.mlp_hidden_dim, 
+                                     self.dim_head, quant_noise,
+                                     qn_block_size, args)
 
     def forward(self, x, edge_index_i, size_i):
         norm_dist = Variable(torch.empty(x.size(0), self.num_heads, self.dim_head,dtype=x.dtype)\
@@ -121,8 +126,11 @@ class SlotAttention(nn.Module):
             alpha = self.atten(q * k, edge_index_i, size_i)
             alpha = self.dropout_module(alpha)
             updates = v * alpha.unsqueeze(-1)
+            updates = updates.view(-1, self.dim_head * self.num_heads)
+
+            slots = self.gru(updates, slots_prev).view(-1, self.num_heads, self.dim_head)
             
-            slots = self.gated_residual(slots_prev, updates)
+            slots = slots + self.mlp(self.norm_mlp(slots))
         return slots
 
 
@@ -279,6 +287,10 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        x_cat = torch.cat([query, key], dim=-1)
+        label_attn = self.slot_attn(x_cat, index, size_i)
+        label_attn = self.dropout(label_attn)
+
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         edge_attr = self.gating_label(label_attn, edge_attr)
         self.edge_attr = edge_attr
@@ -336,16 +348,13 @@ class UCCAEncoder(nn.Module):
         self.convs = Model(*settings_first)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
-        self.gated_residual = GatingResidual(self.in_dim, self.quant_noise, self.quant_noise_block_size, args) 
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
-        residual = x
         x = self.convs_layer_norm(x)
         x_label = self.convs_layer_norm(x_label)
         x_label = self.lin_label(x_label)
         x_label = self.dropout_module(x_label)
         x, x_label = self.convs(x, edge_index, x_label)
-        x = self.gated_residual(x, residual)
         return x, x_label
