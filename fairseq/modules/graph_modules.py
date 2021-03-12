@@ -118,7 +118,7 @@ class SlotAttention(nn.Module):
         v = v * self.dim_head ** -0.5
         # Shape: [N, num_labels, slot_dim]
         for _ in range(self.num_iter):
-            slots_prev = slots
+            slots_prev = slots.view(-1, self.num_heads * self.dim_head)
             slots = self.norm_slots(slots)
             
             q = self.project_q(slots)
@@ -289,7 +289,7 @@ class GraphTransformer(MessagePassing):
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
         x_cat = torch.cat([query, key], dim=-1)
         label_attn = self.slot_attn(x_cat, index, size_i)
-        label_attn = self.dropout(label_attn)
+        label_attn = self.dropout_module(label_attn)
 
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         edge_attr = self.gating_label(label_attn, edge_attr)
