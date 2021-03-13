@@ -260,12 +260,13 @@ class GraphTransformer(MessagePassing):
                     args.dropout, module_name=self.__class__.__name__
                 )
 
-        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
-        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_beta = build_linear(3 * self.heads * self.out_channels, 1, quant_noise, qn_block_size, False)
+        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size)
         self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
         self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
         self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
@@ -283,6 +284,7 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        edge_attr = self.lin_edge(edge_attr)
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         key += edge_attr
         # Attention Mechanism
@@ -344,5 +346,6 @@ class UCCAEncoder(nn.Module):
         x = self.convs_layer_norm(x)
         x = self.convs(x, edge_index, x_label)
         x = F.relu(x)
+        x = self.dropout_module(x)
 
         return x
