@@ -277,7 +277,7 @@ class GraphTransformer(MessagePassing):
         beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
         beta = beta.sigmoid()
         out = beta * x_r + (1 - beta) * out
-        return out, edge_attr
+        return out
     def message(self, x_i, x_j, edge_attr,
                 index, ptr=None,
                 size_i=None):
@@ -337,16 +337,12 @@ class UCCAEncoder(nn.Module):
         
         self.convs = Model(*settings_first)
         self.convs_layer_norm = LayerNorm(self.in_dim)
-        self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
         x = self.convs_layer_norm(x)
-        x_label = self.convs_layer_norm(x_label)
-        x_label = self.lin_label(x_label)
-        x_label = self.dropout_module(x_label)
-        x, x_label = self.convs(x, edge_index, x_label)
+        x = self.convs(x, edge_index, x_label)
         x = F.relu(x)
 
-        return x, x_label
+        return x

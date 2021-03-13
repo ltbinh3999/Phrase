@@ -461,7 +461,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
+            x, x_graph = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)

@@ -70,8 +70,8 @@ class TransformerEncoderLayer(nn.Module):
         self.final_layer_norm = LayerNorm(self.embed_dim)
         # START YOUR CODE
         self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
-        self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
-            self.quant_noise_block_size, args)
+        #self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.graph_attn = self.build_graph_attention(self.embed_dim, args)
         # END YOUR CODE
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
@@ -83,7 +83,19 @@ class TransformerEncoderLayer(nn.Module):
         return quant_noise(
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
         )
-
+    # START YOUR CODE
+    def build_graph_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.encoder_attention_heads,
+            kdim=self.embed_dim,
+            vdim=self.embed_dim,
+            dropout=args.attention_dropout,
+            self_attention=False,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+    # END YOUR CODE
     def build_self_attention(self, embed_dim, args):
         return MultiheadAttention(
             embed_dim,
@@ -151,14 +163,21 @@ class TransformerEncoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
         # START YOUR CODE
+        residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
-        x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
+        x_graph = self.graph_encode(x_graph, src_edges, src_labels)
         batch, dim = x.size(1), x.size(2) 
         residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
         residual_graph += embed_pos
         residual_graph = self.dropout_module(residual_graph)
-        x = self.gated_residual(x, residual_graph.transpose(0, 1))
+        x, _ = self.graph_attn(
+                        query=x,
+                        key=residual_graph,
+                        value=residual_graph
+                        )
+        x = self.dropout_module(x)
+        x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
         # END YOUR CODE
@@ -172,7 +191,7 @@ class TransformerEncoderLayer(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-        return x, x_graph, src_labels
+        return x, x_graph
 
 
 class TransformerDecoderLayer(nn.Module):
