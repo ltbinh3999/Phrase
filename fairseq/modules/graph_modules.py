@@ -264,7 +264,6 @@ class GraphTransformer(MessagePassing):
         self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_edge = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_beta = build_linear(3 * self.heads * self.out_channels, 1, quant_noise, qn_block_size, False)
         self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size)
         self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
@@ -284,7 +283,6 @@ class GraphTransformer(MessagePassing):
                 size_i=None):
         query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
         key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
-        edge_attr = self.lin_edge(edge_attr)
         edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
         key += edge_attr
         # Attention Mechanism
@@ -339,13 +337,14 @@ class UCCAEncoder(nn.Module):
         
         self.convs = Model(*settings_first)
         self.convs_layer_norm = LayerNorm(self.in_dim)
+        self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
         x = self.convs_layer_norm(x)
+        x_label = self.convs_layer_norm(x_label)
+        x_label = self.lin_label(x_label)
+        x_label = self.dropout_module(x_label)
         x = self.convs(x, edge_index, x_label)
-        x = F.relu(x)
-        x = self.dropout_module(x)
-
-        return x
+        return x, x_label
