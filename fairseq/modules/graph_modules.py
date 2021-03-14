@@ -260,12 +260,12 @@ class GraphTransformer(MessagePassing):
                     args.dropout, module_name=self.__class__.__name__
                 )
 
-        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
         self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
         self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
-        self.lin_beta = build_linear(3 * self.heads * self.out_channels, 1, quant_noise, qn_block_size, False)
-        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size)
+        self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_enhanced_value = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, False)
         self.gating_query_value = GatingResidual(self.out_channels, quant_noise, qn_block_size, args)
         self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
         self.attention_vq = ScoreCollections(self.heads, self.out_channels, "Transformer")
@@ -337,13 +337,14 @@ class UCCAEncoder(nn.Module):
         
         self.convs = Model(*settings_first)
         self.convs_layer_norm = LayerNorm(self.in_dim)
+        self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
         x = self.convs_layer_norm(x)
+        x_label = self.convs_layer_norm(x_label)
+        x_label = self.lin_label(x_label)
+        x_label = self.dropout_module(x_label)
         x = self.convs(x, edge_index, x_label)
-        x = F.relu(x)
-        x = self.dropout_module(x)
-
-        return x
+        return x, x_label
