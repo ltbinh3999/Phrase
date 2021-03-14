@@ -110,6 +110,9 @@ def collate(
     else:
         ntokens = src_lengths.sum().item()
     # START YOUR CODE
+    n = len(src_tokens)
+    graph_padding = torch.tensor([pad_idx] * n).long().unsqueeze(-1)
+    src_tokens = torch.cat([graph_padding, src_tokens],dim=1)
     extra_length = src_tokens.eq(pad_idx).long().sum(1)
     max_len = max(len(samples[i]['src_selected_idx']) for i in range(len(samples)))
     seq_len = src_tokens.size(1)
