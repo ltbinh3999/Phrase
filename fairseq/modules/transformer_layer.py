@@ -134,7 +134,7 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(self, x, 
                 x_graph, src_edges, src_selected_idx, src_labels, src_node_idx, embed_pos,
-                encoder_padding_mask, attn_mask: Optional[Tensor] = None):
+                encoder_phrase_padding_mask, encoder_padding_mask, attn_mask: Optional[Tensor] = None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -185,7 +185,8 @@ class TransformerEncoderLayer(nn.Module):
         x_out, _ = self.phrase_attn(
                         query=x,
                         key=x_phrase,
-                        value=x_phrase)
+                        value=x_phrase,
+                        key_padding_mask=encoder_phrase_padding_mask)
         x_out = self.dropout_module(x_out)
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)

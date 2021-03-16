@@ -460,12 +460,12 @@ class TransformerEncoder(FairseqEncoder):
         x = x.transpose(0, 1)
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
-
+        encoder_phrase_padding_mask = src_node_idx.eq(0)
         encoder_states = []
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, src_node_idx, embed_pos, encoder_padding_mask)
+            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, src_node_idx, embed_pos, encoder_phrase_padding_mask, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
