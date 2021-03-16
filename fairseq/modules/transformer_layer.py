@@ -72,7 +72,9 @@ class TransformerEncoderLayer(nn.Module):
         self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
         self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
             self.quant_noise_block_size, args)
-        self.graph_attn = self.build_graph_attention(self.embed_dim, args)
+        self.word_graph_gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
+            self.quant_noise_block_size, args)
+        self.phrase_attn = self.build_phrase_attention(self.embed_dim, args)
         self.attentive_combining_ffw = FeedForward(self.embed_dim*2, 
                                                     2048, 
                                                     self.embed_dim, 
@@ -91,7 +93,7 @@ class TransformerEncoderLayer(nn.Module):
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
         )
     # START YOUR CODE
-    def build_graph_attention(self, embed_dim, args):
+    def build_phrase_attention(self, embed_dim, args):
         return MultiheadAttention(
             embed_dim,
             args.encoder_attention_heads,
@@ -131,7 +133,7 @@ class TransformerEncoderLayer(nn.Module):
                     del state_dict[k]
 
     def forward(self, x, 
-                x_graph, src_edges, src_selected_idx, src_labels, embed_pos,
+                x_graph, src_edges, src_selected_idx, src_labels, src_node_idx, embed_pos,
                 encoder_padding_mask, attn_mask: Optional[Tensor] = None):
         """
         Args:
@@ -177,15 +179,18 @@ class TransformerEncoderLayer(nn.Module):
         residual_graph += embed_pos
         residual_graph = residual_graph.transpose(0, 1)
         residual_graph = self.dropout_module(residual_graph)
-
-        x_out, _ = self.graph_attn(
+        x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
+        x = self.word_graph_gated_residual(x, residual_graph)
+        x = self.self_attn_layer_norm(x)
+        x_out, _ = self.phrase_attn(
                         query=x,
-                        key=residual_graph,
-                        value=residual_graph
-                        )
+                        key=x_phrase,
+                        value=x_phrase)
+        x_out = self.dropout_module(x_out)
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)
         x = self.gated_residual(x, residual_graph)
+        x = self.self_attn_layer_norm(x)
         # END YOUR CODE
         #residual = x
         if self.normalize_before:

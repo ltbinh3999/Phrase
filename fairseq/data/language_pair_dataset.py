@@ -114,15 +114,17 @@ def collate(
     graph_padding = torch.tensor([pad_idx] * n).long().unsqueeze(-1)
     src_tokens = torch.cat([graph_padding, src_tokens],dim=1)
     extra_length = src_tokens.eq(pad_idx).long().sum(1)
-    max_len = max(len(samples[i]['src_selected_idx']) for i in range(len(samples)))
+    max_len_select = max(len(samples[i]['src_selected_idx']) for i in range(len(samples)))
+    max_len_nodes = max(len(samples[i]['src_node_idx']) for i in range(len(samples)))
     seq_len = src_tokens.size(1)
     src_labels = [samples[i]['src_labels'] for i in sort_order]
-    def tensorSelectedIndex(data):
+    def tensorSelectedIndex(data, obj, max_len):
         i, e = data
-        x = samples[i]['src_selected_idx'] + e
+        x = samples[i][obj] + e
         pad = torch.LongTensor([0] * (max_len - x.size(0)))
         return torch.cat([pad, x], dim = 0)
-    src_selected_idx = torch.cat([tensorSelectedIndex(data) for data in zip(sort_order, extra_length)],dim=0).reshape(-1, max_len)
+    src_selected_idx = torch.cat([tensorSelectedIndex(data, "src_selected_idx", max_len_select) for data in zip(sort_order, extra_length)],dim=0).reshape(-1, max_len_select)
+    src_node_idx = torch.cat([tensorSelectedIndex(data, "src_node_idx", max_len_nodes) for data in zip(sort_order, extra_length)],dim=0).reshape(-1, max_len_nodes)
     def tensorEdges(data):
         i, [order, e] = data
         edge = samples[order]['src_edges'] + e # move idx to the right, since padding to the left
@@ -154,6 +156,7 @@ def collate(
             "src_edges": src_edges,
             "src_labels": src_labels,
             "src_selected_idx": src_selected_idx,
+            "src_node_idx": src_node_idx
         },
         "target": target,
     }
@@ -363,8 +366,8 @@ class LanguagePairDataset(FairseqDataset):
         self.ucca = UCCALabel()
         self.src_labels = self.ucca.Label2Seq(src_labels)
         self.intnode_index = self.src_dict.intnode()
-        self.src_selected_idx = None
-        self.get_selected_index()
+        self.src_selected_idx = self.get_selected_index()
+        self.src_node_idx = self.get_node_index()
         # END YOUR CODE
     
     # START YOUR CODE
@@ -373,7 +376,13 @@ class LanguagePairDataset(FairseqDataset):
             select = idx != self.intnode_index
             position = torch.LongTensor(list(range(idx.size(0))))
             return position[select]
-        self.src_selected_idx = [selectIndexTensor(src) for src in self.src]
+        return [selectIndexTensor(src) for src in self.src]
+    def get_node_index(self):
+        def nodeIndexTensor(idx):
+            node = idx == self.intnode_index
+            position = torch.LongTensor(list(range(idx.size(0))))
+            return position[select]
+        return [nodeIndexTensor(src) for src in self.src]
     # END YOUR CODE
     def get_batch_shapes(self):
         return self.buckets

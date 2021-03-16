@@ -265,6 +265,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         src_edges,
         src_labels,
         src_selected_idx,
+        src_node_idx,
         # END YOUR CODE
         prev_output_tokens,
         return_all_hiddens: bool = True,
@@ -281,7 +282,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         encoder_out = self.encoder(
             src_tokens, src_lengths=src_lengths, 
             src_edges = src_edges, src_labels= src_labels, 
-            src_selected_idx = src_selected_idx, return_all_hiddens=return_all_hiddens
+            src_selected_idx = src_selected_idx, src_node_idx = src_node_idx,
+            return_all_hiddens=return_all_hiddens
         )
         decoder_out = self.decoder(
             prev_output_tokens,
@@ -421,6 +423,7 @@ class TransformerEncoder(FairseqEncoder):
         src_edges,
         src_labels,
         src_selected_idx,
+        src_node_idx,
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
     ):
@@ -462,7 +465,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, embed_pos, encoder_padding_mask)
+            x, x_graph, src_labels = layer(x, x_graph, src_edges, src_selected_idx, src_labels, src_node_idx, embed_pos, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)

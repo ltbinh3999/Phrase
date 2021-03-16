@@ -347,5 +347,4 @@ class UCCAEncoder(nn.Module):
         x_label = self.lin_label(x_label)
         x_label = self.dropout_module(x_label)
         x = self.convs(x, edge_index, x_label)
-        x = F.relu(x)
         return x, x_label
