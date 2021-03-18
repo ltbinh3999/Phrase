@@ -212,6 +212,8 @@ class UCCALabel:
     self.labels = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'L', 'N', 'P', 'R', 'S', 'U']
     self.label_dict = {} # total 13 labels
     self.setupDict()
+  def length(self):
+    return len(self.labels)
   def setupDict(self):
     for label in (self.labels):
       self.pushToDict(label)
@@ -362,15 +364,67 @@ class LanguagePairDataset(FairseqDataset):
             self.buckets = None
         self.pad_to_multiple = pad_to_multiple
         # START YOUR CODE
+        self.threshold_rate = 0.1
         self.src_edges = src_edges
         self.ucca = UCCALabel()
         self.src_labels = self.ucca.Label2Seq(src_labels)
+        self.noise_processing() # create noise data
         self.intnode_index = self.src_dict.intnode()
         self.src_selected_idx = self.get_selected_index()
         self.src_node_idx = self.get_node_index()
         # END YOUR CODE
     
     # START YOUR CODE
+    from numpy.random import random_sample
+    from numpy.random import randint
+    def rad_random(self, label, edge, src_len, n_label):
+        del_r = 0.3
+        rep_r = 0.4
+        add_r = 0.3 
+        rate = random_sample(1)[0]
+        if rate < del_r: # delete rate = 30%
+            return [], []
+        elif rate < del_r + rep_r: # replace to random rate = 40%
+            r = random_sample(1)[0] # 50% replace edge or label
+            if r < 0.5: # replace edges
+                u, v = edge
+                new_u = randint(src_len)
+                while u == new_u:
+                    new_u = randint(src_len)
+                return [new_u,v], [label]
+            else: # replace label
+                l = randint(n_label)
+                while l == label:
+                    l = randint(n_label)
+                return edge, [l]
+        else: # add random edge/label rate = 30%
+            u = randint(src_len)
+            v = randint(src_len)
+            while v == u:
+            v = randint(src_len)
+            l = randint(n_label)
+            return [edge, [u, v]], [label, l]
+    def noise_processing(self):
+        new_labels = []
+        new_edges = []
+        total_labels = self.ucca.length
+        for src, label, edge in zip(*(self.src, self.src_labels, self.src_edges)):
+            new_label = []
+            new_edge = []
+            rates = random_sample((len(label),)) > self.threshold_rate
+            for r, l, e in zip(*(rates, label, edge)):
+                if r:
+                    new_label.append(l)
+                    new_edge.append(e)
+                else:
+                    generated_edge, generated_label = self.rad_random(l, e, len(src), total_labels)
+                    new_label += generated_label
+                    new_edge += generated_edge
+            new_labels.append(new_label)
+            new_edges.append(new_edge)
+        self.src_edges = new_edges
+        self.src_labels = new_labels
+
     def get_selected_index(self):
         def selectIndexTensor(idx):
             select = idx != self.intnode_index
