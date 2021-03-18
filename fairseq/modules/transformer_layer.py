@@ -160,15 +160,6 @@ class TransformerEncoderLayer(nn.Module):
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
-        x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
-        batch, dim = x.size(1), x.size(2) 
-        residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        residual_graph += embed_pos
-        residual_graph = residual_graph.transpose(0, 1)
-        residual_graph = self.dropout_module(residual_graph)
-        x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
-        x = self.word_graph_gated_residual(x, residual_graph)
-        x = self.self_attn_layer_norm(x)
         x, _ = self.self_attn(
             query=x,
             key=x,
@@ -182,15 +173,23 @@ class TransformerEncoderLayer(nn.Module):
             x = self.self_attn_layer_norm(x)
         # START YOUR CODE
         residual = x
+        x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
+        batch, dim = x.size(1), x.size(2) 
+        residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        residual_graph += embed_pos
+        residual_graph = residual_graph.transpose(0, 1)
+        residual_graph = self.dropout_module(residual_graph)
+        x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
+        x = self.word_graph_gated_residual(x, residual_graph)
+        x = self.self_attn_layer_norm(x)
         x_out, _ = self.phrase_attn(
                         query=x,
                         key=x_phrase,
-                        value=x_phrase,
-                        key_padding_mask=encoder_phrase_padding_mask)
+                        value=x_phrase)
         x_out = self.dropout_module(x_out)
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)
-        x = self.gated_residual(x, residual)
+        x = self.gated_residual(x, residual_graph)
         x = self.self_attn_layer_norm(x)
         # END YOUR CODE
         #residual = x
