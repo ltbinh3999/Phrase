@@ -9,6 +9,8 @@ import numpy as np
 import torch
 from fairseq.data import FairseqDataset, data_utils
 import torch
+from numpy.random import random_sample
+from numpy.random import randint
 
 logger = logging.getLogger(__name__)
 
@@ -375,8 +377,7 @@ class LanguagePairDataset(FairseqDataset):
         # END YOUR CODE
     
     # START YOUR CODE
-    from numpy.random import random_sample
-    from numpy.random import randint
+    
     def rad_random(self, label, edge, src_len, n_label):
         del_r = 0.3
         rep_r = 0.4
@@ -391,28 +392,29 @@ class LanguagePairDataset(FairseqDataset):
                 new_u = randint(src_len)
                 while u == new_u:
                     new_u = randint(src_len)
-                return [new_u,v], [label]
+                return [[new_u,v]], [label]
             else: # replace label
                 l = randint(n_label)
                 while l == label:
                     l = randint(n_label)
-                return edge, [l]
+                return [edge], [l]
         else: # add random edge/label rate = 30%
             u = randint(src_len)
             v = randint(src_len)
             while v == u:
-            v = randint(src_len)
+                v = randint(src_len)
             l = randint(n_label)
             return [edge, [u, v]], [label, l]
     def noise_processing(self):
         new_labels = []
         new_edges = []
-        total_labels = self.ucca.length
+        total_labels = self.ucca.length()
         for src, label, edge in zip(*(self.src, self.src_labels, self.src_edges)):
             new_label = []
             new_edge = []
             rates = random_sample((len(label),)) > self.threshold_rate
-            for r, l, e in zip(*(rates, label, edge)):
+            for r, l, e in zip(*(rates, label, edge.transpose(0, 1))):
+                e = e.tolist()
                 if r:
                     new_label.append(l)
                     new_edge.append(e)
@@ -420,7 +422,11 @@ class LanguagePairDataset(FairseqDataset):
                     generated_edge, generated_label = self.rad_random(l, e, len(src), total_labels)
                     new_label += generated_label
                     new_edge += generated_edge
-            new_labels.append(new_label)
+            
+            new_labels.append(torch.LongTensor(new_label))
+            new_edge = torch.LongTensor(new_edge)
+            if len(new_edge) != 0:
+              new_edge = new_edge.transpose(0, 1)
             new_edges.append(new_edge)
         self.src_edges = new_edges
         self.src_labels = new_labels
