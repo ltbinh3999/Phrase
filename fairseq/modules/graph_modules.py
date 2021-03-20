@@ -150,31 +150,31 @@ class EdgeConv(MessagePassing):
 class GraphSage(MessagePassing):
     def __init__(self, in_channels, out_channels, 
                 quant_noise, qn_block_size, args,
-                reducer='mean', normalize_embedding=True):
-        super(GraphSage, self).__init__(aggr='mean')
+                reducer='mean', normalize=True,  **kwargs):
+        kwargs.setdefault('aggr', reducer)
+        super(GraphSage, self).__init__(**kwargs)
 
         self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
         self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
-        if normalize_embedding:
-            self.normalize_emb = True
+        if normalize:
+            self.normalize = True
     def forward(self, x, edge_index, x_label):
         num_nodes = x.size(0)
-        x += x_label
-        out = self.propagate(edge_index, size=(num_nodes, num_nodes), x=x)
+        x = (x, x)
+        out = self.propagate(edge_index, x=x, edge_attr=x_label)
         out = self.agg_lin(out)
-        out = self.lin(x) + out
+        x_j = x[1]
+        out += self.lin(x_j)
+        if self.normalize:
+            out = F.normalize(out, p=2., dim=-1)
         return out
-    def message(self, x_j, edge_index, size):
-        row, col = edge_index
-        deg = pyg_utils.degree(row, size[0], dtype=x_j.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-
-        return norm.view(-1, 1) * x_j
-    def update(self, aggr_out):
-        if self.normalize_emb:
-            aggr_out = F.normalize(aggr_out, 2, dim=-1)
-        return aggr_out
+    def message(self, x_j, edge_attr):
+        x_j += edge_attr
+        return x_j
+    def message_and_aggregate(self, adj_t,
+                              x):
+        adj_t = adj_t.set_value(None, layout=None)
+        return matmul(adj_t, x[0], reduce=self.aggr)
 
 class GAT(MessagePassing):
     def __init__(self, in_channels, out_channels, 
@@ -394,4 +394,5 @@ class UCCAEncoder(nn.Module):
                 x_label = self.dropout_module(x_label)
                 x = convs(x, edge_index, x_label)
                 x = self.dropout_module(x)
+                x = F.relu(x)
         return x, x_label

@@ -176,9 +176,9 @@ class TransformerEncoderLayer(nn.Module):
             x = self.self_attn_layer_norm(x)
         # START YOUR CODE
         residual = x
+        batch, dim = x.size(1), x.size(2) 
         if self.is_graph_outside == False:
             x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
-            batch, dim = x.size(1), x.size(2) 
             residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
             residual_graph += embed_pos
             residual_graph = residual_graph.transpose(0, 1)

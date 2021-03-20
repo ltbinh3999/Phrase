@@ -179,9 +179,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
         # START YOUR CODE
         parser.add_argument('--graph-type', type=str, metavar='STR',
                             help='graph module type e.g: GAT, Sage, normal')
-        parser.add_argument('--is-graph-outside', type=bool, default=False, action='store_true',
+        parser.add_argument('--is-graph-outside', default=False, action='store_true',
                             help='if true, graph encoder outside the Transformer')
-        parser.add_argument('--is-phrase-information', type=bool, default=False, action='store_true',
+        parser.add_argument('--is-phrase-information', default=False, action='store_true',
                             help='if true, using x_phrase information instead x_graph for cross-attention')
         # END YOUR CODE
         # fmt: on
@@ -384,7 +384,7 @@ class TransformerEncoder(FairseqEncoder):
         # START YOUR CODE
         self.is_graph_outside = getattr(args, "is_graph_outside", False)
         if self.is_graph_outside == True:
-            self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args)
+            self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args, layers=6)
         self.label_embedding = nn.Embedding(13, embed_dim)
         nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
         # END YOUR CODE
