@@ -159,6 +159,7 @@ class GraphSage(MessagePassing):
             self.normalize_emb = True
     def forward(self, x, edge_index, x_label):
         num_nodes = x.size(0)
+        x += x_label
         out = self.propagate(edge_index, size=(num_nodes, num_nodes), x=x)
         out = self.agg_lin(out)
         out = self.lin(x) + out
@@ -206,34 +207,22 @@ class GAT(MessagePassing):
             self.register_parameter('bias', None)
         if bias:
             nn.init.zeros_(self.bias)
-        self.label_linear = build_linear(self.out_channels, self.out_channels, quant_noise, qn_block_size, bias=False)
-        self.slot_attn = SlotAttention(self.head_dim, self.in_channels, self.heads, quant_noise, qn_block_size, args)
-        self.gating_label = GatingResidual(self.in_channels, quant_noise, qn_block_size, args)
-        self.label_ffn_combine = FeedForward(2 * self.out_channels, 2048, self.out_channels, quant_noise, qn_block_size, args)
 
     def forward(self, x, edge_index, x_label, size=None):
-        self.x_label = x_label
         x = self.lin(x)
-        return self.propagate(edge_index, size=size, x=x)
-    def message(self, edge_index_i, x_i, x_j, size_i):
-        
+        return self.propagate(edge_index, size=size, x=x, edge_attr=x_label)
+    def message(self, edge_index_i, x_i, x_j, size_i, edge_attr):
+        x_i += edge_attr
         x_i = x_i.view(-1, self.heads, self.head_dim)
         x_j = x_j.view(-1, self.heads, self.head_dim)
         x_cat = torch.cat([x_i, x_j], dim=-1) # x_cat.shape = (N, heads, 2 * head_dim)
 
-        label_attn = self.slot_attn(x_cat, edge_index_i, size_i)
-        x_label = self.gating_label(label_attn, self.x_label)
 
         alpha = F.leaky_relu((x_cat * self.att).sum(-1), 0.2)
         alpha = pyg_utils.softmax(alpha, edge_index_i, num_nodes=size_i)
 
         alpha = self.dropout_module(alpha)
         edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
-        residual = edge_features
-        edge_out = self.label_linear(edge_features) + x_label
-        edge_out = self.label_ffn_combine(torch.cat([edge_features, edge_out], dim=-1))
-        edge_out = self.dropout_module(edge_out)
-        edge_features = residual + edge_out
         return edge_features
     def update(self, aggr_out):
         if self.concat is True:
@@ -246,6 +235,51 @@ class GAT(MessagePassing):
         return aggr_out
 
 class GraphTransformer(MessagePassing):
+    def __init__(self, in_channels, out_channels: int, quant_noise, qn_block_size, args,
+                 heads: int = 1,**kwargs):
+        kwargs.setdefault('aggr', 'add')
+        super(GraphTransformer, self).__init__(node_dim=0, **kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.edge_dim = in_channels
+
+        self.dropout_module = FairseqDropout(
+                    args.dropout, module_name=self.__class__.__name__
+                )
+
+        self.lin_key = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_value = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size, False)
+        self.lin_query = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_skip = build_linear(self.in_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.lin_beta = build_linear(3 * self.heads * self.out_channels, self.heads * self.out_channels, quant_noise, qn_block_size)
+        self.attention_qk = ScoreCollections(self.heads, self.out_channels, "Transformer")
+    def forward(self, x, edge_index, edge_attr):
+        x = (x, x)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        out = out.view(-1, self.heads * self.out_channels)
+        x_r = self.lin_skip(x[1])
+        beta = self.lin_beta(torch.cat([out, x_r, out - x_r], dim=-1))
+        beta = beta.sigmoid()
+        out = beta * x_r + (1 - beta) * out
+        return out
+    def message(self, x_i, x_j, edge_attr,
+                index, ptr=None,
+                size_i=None):
+        query = self.lin_query(x_i).view(-1, self.heads, self.out_channels)
+        key = self.lin_key(x_j).view(-1, self.heads, self.out_channels)
+        edge_attr = edge_attr.view(-1, self.heads, self.out_channels)
+        key += edge_attr
+        # Attention Mechanism
+        alpha = self.attention_qk(query * key, index, size_i)
+        alpha = self.dropout_module(alpha)
+
+        value = self.lin_value(x_j).view(-1, self.heads, self.out_channels)
+        value += edge_attr
+        out = value * alpha.view(-1, self.heads, 1)
+        return out
+class EnhancedGraphTransformer(MessagePassing):
     def __init__(self, in_channels, out_channels: int, quant_noise, qn_block_size, args,
                  heads: int = 1,**kwargs):
         kwargs.setdefault('aggr', 'add')
@@ -301,13 +335,9 @@ class GraphTransformer(MessagePassing):
         out = value_enhanced * alpha.view(-1, self.heads, 1)
 
         return out
-    def __repr__(self):
-        return '{}({}, {}, heads={})'.format(self.__class__.__name__,
-                                             self.in_channels,
-                                             self.out_channels, self.heads)
 
 class UCCAEncoder(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, args):
+    def __init__(self, in_dim, hidden_dim, out_dim, args, layers=1):
         super(UCCAEncoder, self).__init__()
         
         self.in_dim = in_dim
@@ -322,29 +352,46 @@ class UCCAEncoder(nn.Module):
         graph_type = getattr(args, 'graph_type', None)
         if graph_type == "GAT":
             Model = GAT
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            settings = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         elif graph_type == "GraphSage":
             Model = GraphSage
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+            settings = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
         elif graph_type == "GraphTransformer":
             Model = GraphTransformer
             head_dim = hidden_dim // 8
-            settings_first = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+            settings = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
+        elif graph_type == "EnhancedGraphTransformer":
+            Model = EnhancedGraphTransformer
+            head_dim = hidden_dim // 8
+            settings = (in_dim, head_dim, self.quant_noise, self.quant_noise_block_size, args, 8)
         else:
             Model = EdgeConv
-            settings_first = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
-
-        
-        self.convs = Model(*settings_first)
+            settings = (in_dim, hidden_dim, self.quant_noise, self.quant_noise_block_size, args)
+        self.layers = layers
+        if self.layers > 1:
+            self.convs = nn.ModuleList()
+            for i in range(layers):
+                self.convs.append(Model(*settings))
+        else:
+            self.convs = Model(*settings)
         self.convs_layer_norm = LayerNorm(self.in_dim)
         self.lin_label = build_linear(self.in_dim, self.in_dim, self.quant_noise, self.quant_noise_block_size, False)
 
     def residual_connection(self, x, residual):
         return residual + x
     def forward(self, x, edge_index, x_label):
-        x = self.convs_layer_norm(x)
-        x_label = self.convs_layer_norm(x_label)
-        x_label = self.lin_label(x_label)
-        x_label = self.dropout_module(x_label)
-        x = self.convs(x, edge_index, x_label)
+        if self.layers == 1:
+            x = self.convs_layer_norm(x)
+            x_label = self.convs_layer_norm(x_label)
+            x_label = self.lin_label(x_label)
+            x_label = self.dropout_module(x_label)
+            x = self.convs(x, edge_index, x_label)
+        else:
+            for convs in self.convs:
+                x = self.convs_layer_norm(x)
+                x_label = self.convs_layer_norm(x_label)
+                x_label = self.lin_label(x_label)
+                x_label = self.dropout_module(x_label)
+                x = convs(x, edge_index, x_label)
+                x = self.dropout_module(x)
         return x, x_label

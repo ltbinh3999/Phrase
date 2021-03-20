@@ -28,6 +28,7 @@ from fairseq.modules import (
 )
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
+from fairseq.modules.graph_modules import UCCAEncoder
 from torch import Tensor
 
 
@@ -174,10 +175,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--quant-noise-pq-block-size', type=int, metavar='D', default=8,
                             help='block size of quantization noise at training time')
         parser.add_argument('--quant-noise-scalar', type=float, metavar='D', default=0,
-                            help='scalar quantization noise and scalar quantization at training time')
+                            help='scalar quantization noise and scalar quantization at training time')       
         # START YOUR CODE
         parser.add_argument('--graph-type', type=str, metavar='STR',
                             help='graph module type e.g: GAT, Sage, normal')
+        parser.add_argument('--is-graph-outside', type=bool, default=False, action='store_true',
+                            help='if true, graph encoder outside the Transformer')
+        parser.add_argument('--is-phrase-information', type=bool, default=False, action='store_true',
+                            help='if true, using x_phrase information instead x_graph for cross-attention')
         # END YOUR CODE
         # fmt: on
 
@@ -377,7 +382,9 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layer_norm = None
         # START YOUR CODE
-
+        self.is_graph_outside = getattr(args, "is_graph_outside", False)
+        if self.is_graph_outside == True:
+            self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args)
         self.label_embedding = nn.Embedding(13, embed_dim)
         nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
         # END YOUR CODE
@@ -456,6 +463,12 @@ class TransformerEncoder(FairseqEncoder):
         src_labels = self.dropout_module(src_labels)
         if self.quant_noise is not None:
             src_labels = self.quant_noise(src_labels)
+        if self.is_graph_outside == True:
+            x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
+            batch, dim = x.size(0), x.size(2) 
+            x_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+            x_graph += self.dropout_module(embed_pos)
+            x_graph = x_graph.transpose(0, 1)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
         # compute padding mask

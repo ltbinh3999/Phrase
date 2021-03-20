@@ -69,7 +69,10 @@ class TransformerEncoderLayer(nn.Module):
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
         # START YOUR CODE
-        self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
+        self.is_graph_outside = getattr(args, "is_graph_outside", False)
+        self.is_phrase_information = getattr(args, "is_phrase_information", False)
+        if self.is_graph_outside == False:
+            self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
         self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
             self.quant_noise_block_size, args)
         self.word_graph_gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
@@ -173,19 +176,29 @@ class TransformerEncoderLayer(nn.Module):
             x = self.self_attn_layer_norm(x)
         # START YOUR CODE
         residual = x
-        x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
-        batch, dim = x.size(1), x.size(2) 
-        residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-        residual_graph += embed_pos
-        residual_graph = residual_graph.transpose(0, 1)
-        residual_graph = self.dropout_module(residual_graph)
-        x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
+        if self.is_graph_outside == False:
+            x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
+            batch, dim = x.size(1), x.size(2) 
+            residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+            residual_graph += embed_pos
+            residual_graph = residual_graph.transpose(0, 1)
+            residual_graph = self.dropout_module(residual_graph)
+        else:
+            residual_graph = x_graph
         x = self.word_graph_gated_residual(x, residual_graph)
         x = self.self_attn_layer_norm(x)
-        x_out, _ = self.phrase_attn(
-                        query=x,
-                        key=x_phrase,
-                        value=x_phrase)
+        if self.is_phrase_information == True:
+            x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
+            x_out, _ = self.phrase_attn(
+                            query=x,
+                            key=x_phrase,
+                            value=x_phrase)
+        else:
+            x_out, _ = self.phrase_attn(
+                            query=x,
+                            key=residual_graph,
+                            value=residual_graph,
+                            key_padding_mask=encoder_padding_mask)
         x_out = self.dropout_module(x_out)
         x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
         x = self.dropout_module(x)

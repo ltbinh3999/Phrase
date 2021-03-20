@@ -370,7 +370,7 @@ class LanguagePairDataset(FairseqDataset):
         self.src_edges = src_edges
         self.ucca = UCCALabel()
         self.src_labels = self.ucca.Label2Seq(src_labels)
-        self.noise_processing() # create noise data
+        #self.noise_processing() # create noise data
         self.intnode_index = self.src_dict.intnode()
         self.src_selected_idx = self.get_selected_index()
         self.src_node_idx = self.get_node_index()
