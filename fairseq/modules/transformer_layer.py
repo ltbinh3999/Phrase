@@ -15,6 +15,7 @@ from torch import Tensor
 
 # START YOUR CODE
 from fairseq.modules.graph_modules import UCCAEncoder, GatingResidual, FeedForward
+import torch.nn.functional as F
 # END YOUR CODE
 
 class TransformerEncoderLayer(nn.Module):
