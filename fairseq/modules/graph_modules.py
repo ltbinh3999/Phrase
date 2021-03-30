@@ -212,7 +212,7 @@ class GAT(MessagePassing):
             self.register_parameter('bias', None)
         if bias:
             nn.init.zeros_(self.bias)
-
+        self.ffn = FeedForward(self.out_channels, 2048, self.out_channels, quant_noise, qn_block_size, args)
     def forward(self, x, edge_index, x_label, size=None):
         x = self.lin(x)
         return self.propagate(edge_index, size=size, x=x, edge_attr=x_label)
@@ -228,6 +228,7 @@ class GAT(MessagePassing):
 
         alpha = self.dropout_module(alpha)
         edge_features = (x_j * alpha.unsqueeze(-1)).view(-1, self.out_channels)
+        edge_features = self.ffn(edge_features)
         return edge_features
     def update(self, aggr_out):
         if self.concat is True:
