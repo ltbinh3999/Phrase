@@ -153,9 +153,13 @@ class GraphSage(MessagePassing):
                 reducer='mean', normalize=True,  **kwargs):
         kwargs.setdefault('aggr', reducer)
         super(GraphSage, self).__init__(**kwargs)
-
+        self.hidden_dim = 2048
         self.lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
         self.agg_lin = build_linear(in_channels, out_channels, quant_noise, qn_block_size)
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
+        self.ffn = FeedForward(out_channels, 2048, out_channels, quant_noise, qn_block_size, args)
         if normalize:
             self.normalize = True
     def forward(self, x, edge_index, x_label):
@@ -165,6 +169,7 @@ class GraphSage(MessagePassing):
         out = self.agg_lin(out)
         x_j = x[1]
         out += self.lin(x_j)
+        out = self.dropout_module(self.ffn(out))
         if self.normalize:
             out = F.normalize(out, p=2., dim=-1)
         return out
