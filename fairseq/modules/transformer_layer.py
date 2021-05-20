@@ -7,13 +7,145 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from fairseq import utils
 from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor
+from torch.autograd import Variable
 
+# START YOUR CODE
+class PhraseFeedForward(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim, quant_noise, qn_block_size, args, bias=True):
+        super().__init__()
+        self.fc1 = self.build_ffn(in_dim, hidden_dim, quant_noise, qn_block_size, bias)
+        self.fc2 = self.build_ffn(hidden_dim, out_dim, quant_noise, qn_block_size, bias)
+        self.phrase_activation_fn = utils.get_activation_fn(
+            activation=getattr(args, 'activation_fn', 'relu') or "relu"
+        ) #torch.sigmoid
+        activation_dropout_p = getattr(args, "activation_dropout", 0) or 0
+        if activation_dropout_p == 0:
+            # for backwards compatibility with models that use args.relu_dropout
+            activation_dropout_p = getattr(args, "relu_dropout", 0) or 0
+        self.activation_dropout_module = FairseqDropout(
+            float(activation_dropout_p), module_name=self.__class__.__name__
+        )
+    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size, bias):
+      return quant_noise(
+            nn.Linear(input_dim, output_dim, bias), p=q_noise, block_size=qn_block_size
+        )
+    def forward(self, x):
+        x = self.phrase_activation_fn(self.fc1(x))
+        x = self.activation_dropout_module(x)
+        x = self.fc2(x)
+        return x
+class GatingResidual(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, quant_noise, qn_block_size, args):
+        super().__init__()
+        self.fc1 = self.build_ffn(embed_dim, hidden_dim, quant_noise, qn_block_size)
+        self.fc_sublayer = self.build_ffn(embed_dim, hidden_dim, quant_noise, qn_block_size)
+    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size):
+      return quant_noise(
+            nn.Linear(input_dim, output_dim, bias = False), p=q_noise, block_size=qn_block_size
+        )
+    def forward(self, x, sublayer):
+        alpha = torch.sigmoid(self.fc1(x) + self.fc_sublayer(sublayer))
+        x = alpha * x + (1 - alpha) * sublayer
+        return x
+class ScoringPhrase(nn.Module):
+    def __init__(self, in_dim, hidden_dim, quant_noise, quant_noise_block_size, args):
+        super().__init__()
+        self.dropout_module = FairseqDropout(
+            args.dropout, module_name=self.__class__.__name__
+        )
+        self.score_ffn = PhraseFeedForward(in_dim * 2, 
+                                          hidden_dim, 
+                                          1, 
+                                          quant_noise, 
+                                          quant_noise_block_size,
+                                          args)
+    def forward(self, x, phrase_shape):
+        x_phrase = x.reshape(*phrase_shape, -1)
+        n_tok = x_phrase.shape[2]
+        Re_all = x_phrase.mean(axis=2, keepdim=True)
+        score = self.score_ffn(torch.cat(
+                        (x_phrase, Re_all.expand((-1,-1,n_tok,-1))), dim=-1))
+        score = self.dropout_module(score)
+        score = F.softmax(score, dim=2)
+        phrase_score = (x_phrase * score).sum(2)
+        return phrase_score
 
+class SlotAttention(nn.Module):
+    def __init__(self, args, in_dim, out_dim, quant_noise, qn_block_size, epsilon=1e-8):
+        super().__init__()
+        
+        self.eps = epsilon
+        self.num_iter = 3        
+        self.slot_size = out_dim
+        self.mlp_hidden_dim = 2048
+        
+        self.norm_slots = LayerNorm(self.slot_size)
+        self.norm_mlp = LayerNorm(self.slot_size)
+        self.norm_inputs = LayerNorm(in_dim)
+        
+        
+        self.project_q = self.build_ffn(in_dim, self.slot_size, quant_noise, qn_block_size, False)
+        self.project_k = self.build_ffn(in_dim, self.slot_size, quant_noise, qn_block_size, False)
+        self.project_v = self.build_ffn(in_dim, self.slot_size, quant_noise, qn_block_size, False)
+        self.gru = nn.GRUCell(self.slot_size, 512)
+        
+        self.mlp = PhraseFeedForward(self.slot_size, self.mlp_hidden_dim, 
+                                     self.slot_size, quant_noise,
+                                     qn_block_size, args)
+        # Phrase Score
+        self.phrase_score = ScoringPhrase(in_dim, 2048, quant_noise, qn_block_size, args)
+    def build_ffn(self, input_dim, output_dim, q_noise, qn_block_size, bias=True):
+        return quant_noise(
+            nn.Linear(input_dim, output_dim, bias), p=q_noise, block_size=qn_block_size
+        )
+    def forward(self, query, key, value, phrase_shape):
+        """
+            Input shape = [batch_size, seql, embed_dim]
+            Output shape = [batch_size, num_slots, slot_dim]
+        """
+        
+        #x = self.norm_inputs(x).transpose(1, 0)
+        query = query.transpose(1, 0)
+        k = self.project_k(key).transpose(1, 0) #Shape: [batch_size, seql, slot_dim]
+        v = self.project_v(value).transpose(1, 0) #Shape: [batch_size, seql, slot_dim]
+        k = k * self.slot_size ** -0.5
+        v = v * self.slot_size ** -0.5
+
+        slots = self.phrase_score(query, phrase_shape)
+        # Shape: [batch_size, num_slots, slot_dim] or [batch_size, total_phrase, slot_dim]
+        for _ in range(self.num_iter):
+            slots_prev = slots.transpose(1,0)
+            slots = self.norm_slots(slots)
+            
+            # Attention
+            q = self.project_q(slots) # Shape: [batch_size, num_slots, slot_dim]
+            q = q * self.slot_size ** -0.5 # Normalization
+            attn_logits = torch.bmm(k, q.transpose(2,1))
+            attn = F.softmax(attn_logits, dim=-1)
+            # Shape: [batch_size, seql, num_slots].
+            
+            # Weighted Mean
+            attn = attn + self.eps
+            attn = attn / attn.sum(axis=-2,keepdim=True)
+            updates = torch.bmm(attn.transpose(2, 1), v)
+            # Update Shape: [batch_size, num_slots, slot_dim]
+            
+            output = []
+            updates = updates.transpose(1,0)
+            for i in range(updates.size(0)):
+                output.append(self.gru(updates[i],slots_prev[i]))
+            slots = torch.stack(output).transpose(1,0)
+            
+            slots = slots + self.mlp(self.norm_mlp(slots))
+        return slots.transpose(1, 0)
+# END YOUR CODE  
 class TransformerEncoderLayer(nn.Module):
     """Encoder layer block.
 
@@ -64,7 +196,28 @@ class TransformerEncoderLayer(nn.Module):
         )
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
-
+        
+        # START YOUR CODE
+        phrase_hidden_dim = args.parse_hidden_dim
+        self.attentive_combining_ffw = PhraseFeedForward(self.embed_dim*2, 
+                                                      phrase_hidden_dim, 
+                                                      self.embed_dim, 
+                                                      self.quant_noise, 
+                                                      self.quant_noise_block_size,
+                                                      args)
+        self.phrase_attn = self.build_phrase_attention(self.embed_dim, args)
+        self.context_residual = GatingResidual(self.embed_dim, 
+                                               1,
+                                               self.quant_noise, 
+                                               self.quant_noise_block_size,
+                                               args)
+        self.slot_attention = SlotAttention(args,
+                                            self.embed_dim,
+                                            self.embed_dim,
+                                            self.quant_noise,
+                                            self.quant_noise_block_size)
+        # END YOUR CODE
+        
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(
             nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
@@ -85,6 +238,21 @@ class TransformerEncoderLayer(nn.Module):
             qn_block_size=self.quant_noise_block_size,
         )
 
+    # START YOUR CODE
+
+    def build_phrase_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.encoder_attention_heads,
+            kdim=self.embed_dim,
+            vdim=self.embed_dim,
+            dropout=args.attention_dropout,
+            self_attention=False,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+    
+    # END YOUR CODE
     def residual_connection(self, x, residual):
         return residual + x
 
@@ -102,7 +270,7 @@ class TransformerEncoderLayer(nn.Module):
                     state_dict["{}.{}.{}".format(name, new, m)] = state_dict[k]
                     del state_dict[k]
 
-    def forward(self, x, encoder_padding_mask, attn_mask: Optional[Tensor] = None):
+    def forward(self, x, encoder_padding_mask, phrase_shape, attn_mask: Optional[Tensor] = None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -127,8 +295,7 @@ class TransformerEncoderLayer(nn.Module):
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
 
         residual = x
-        if self.normalize_before:
-            x = self.self_attn_layer_norm(x)
+        
         x, _ = self.self_attn(
             query=x,
             key=x,
@@ -141,7 +308,27 @@ class TransformerEncoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
 
+        phrase_residual = x
         residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+        # START YOUR CODE
+        x_phrase = self.slot_attention(x, x, x, phrase_shape)
+        x_out, _ = self.phrase_attn(
+                query=x, 
+                key=x_phrase, 
+                value=x_phrase)
+        x_out = self.dropout_module(x_out)
+        
+        x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
+        x = self.dropout_module(x)
+        x = self.context_residual(phrase_residual, x)
+        #residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+        # END YOUR CODE
+        
+        #residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
         x = self.activation_fn(self.fc1(x))
@@ -267,7 +454,6 @@ class TransformerDecoderLayer(nn.Module):
             q_noise=self.quant_noise,
             qn_block_size=self.quant_noise_block_size,
         )
-
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
 
@@ -285,7 +471,7 @@ class TransformerDecoderLayer(nn.Module):
         self_attn_mask: Optional[torch.Tensor] = None,
         self_attn_padding_mask: Optional[torch.Tensor] = None,
         need_attn: bool = False,
-        need_head_weights: bool = False,
+        need_head_weights: bool = False
     ):
         """
         Args:
@@ -304,6 +490,7 @@ class TransformerDecoderLayer(nn.Module):
             need_attn = True
 
         residual = x
+                        
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
         if prev_self_attn_state is not None:
@@ -352,11 +539,13 @@ class TransformerDecoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
+        
+        residual = x
+        
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
-
         if self.encoder_attn is not None and encoder_out is not None:
-            residual = x
+            
             if self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
             if prev_attn_state is not None:
@@ -369,7 +558,8 @@ class TransformerDecoderLayer(nn.Module):
                     saved_state["prev_key_padding_mask"] = prev_attn_state[2]
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
-
+            
+            
             x, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,
