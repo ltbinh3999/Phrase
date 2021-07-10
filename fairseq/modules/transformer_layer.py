@@ -69,10 +69,16 @@ class TransformerEncoderLayer(nn.Module):
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
         # START YOUR CODE
-        self.is_graph_outside = getattr(args, "is_graph_outside", False)
-        self.is_phrase_information = getattr(args, "is_phrase_information", False)
-        if self.is_graph_outside == False:
-            self.graph_encode = UCCAEncoder(self.embed_dim, self.embed_dim, self.embed_dim, args)
+        self.x_graph_norm = LayerNorm(self.embed_dim)
+        self.graph_level_norm = LayerNorm(self.embed_dim)
+        self.phrase_level_norm = LayerNorm(self.embed_dim)
+        self.ffn_norm = LayerNorm(self.embed_dim)
+        self.ffn = FeedForward(self.embed_dim, 
+                                2048, 
+                                self.embed_dim, 
+                                self.quant_noise, 
+                                self.quant_noise_block_size,
+                                args)
         self.gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
             self.quant_noise_block_size, args)
         self.word_graph_gated_residual = GatingResidual(self.embed_dim, self.quant_noise,
@@ -160,61 +166,64 @@ class TransformerEncoderLayer(nn.Module):
         # will become -inf, which results in NaN in model parameters
         if attn_mask is not None:
             attn_mask = attn_mask.masked_fill(attn_mask.to(torch.bool), -1e8)
-        residual = x
+        # START YOUR CODE
+        # Pass to Graph Encode => graph_level, phrase_level, concept_level
+        residual = x_graph
+        batch, dim = x.size(1), x.size(2)
         if self.normalize_before:
-            x = self.self_attn_layer_norm(x)
-        x, _ = self.self_attn(
-            query=x,
-            key=x,
-            value=x,
+            x_graph = self.x_graph_norm(x_graph)
+        x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
+        x_graph = self.dropout_module(x_graph)
+        x_graph = self.residual_connection(x_graph, residual)
+        if not self.normalize_before:
+            x_graph = self.x_graph_norm(x_graph)
+        graph_level = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
+        graph_level += embed_pos
+        graph_level = graph_level.transpose(0, 1)
+        phrase_level = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
+
+        concept_level = x_graph.reshape(batch,-1,dim)
+        concept_level = concept_level.sum(dim=1) / concept_level.size(1)
+
+        # Self_attention for graph_level => x
+        residual = graph_level
+        if self.normalize_before:
+            graph_level = self.graph_level_norm(graph_level)
+        x = self.self_attn(
+            query=graph_level,
+            key=graph_level,
+            value=graph_level,
             key_padding_mask=encoder_padding_mask,
             attn_mask=attn_mask,
         )
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
-            x = self.self_attn_layer_norm(x)
-        # START YOUR CODE
+            x = self.phrase_level_norm(x)
+        # Cross-attention x & phrase_level => x
+        
         residual = x
-        batch, dim = x.size(1), x.size(2) 
-        if self.is_graph_outside == False:
-            x_graph, src_labels = self.graph_encode(x_graph, src_edges, src_labels)
-            residual_graph = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_selected_idx.unsqueeze(-1).repeat(1,1,dim))
-            residual_graph += embed_pos
-            residual_graph = residual_graph.transpose(0, 1)
-            residual_graph = self.dropout_module(residual_graph)
-        else:
-            residual_graph = x_graph
-        x = self.word_graph_gated_residual(x, residual_graph)
-        x = self.self_attn_layer_norm(x)
-        if self.is_phrase_information == True:
-            x_phrase = torch.gather(x_graph.reshape(batch,-1,dim), 1, src_node_idx.unsqueeze(-1).repeat(1,1,dim))
-            x_out, _ = self.phrase_attn(
-                            query=x,
-                            key=x_phrase,
-                            value=x_phrase)
-        else:
-            x_out, _ = self.phrase_attn(
-                            query=x,
-                            key=residual_graph,
-                            value=residual_graph,
-                            key_padding_mask=encoder_padding_mask)
-        x_out = self.dropout_module(x_out)
-        x = self.attentive_combining_ffw(torch.cat((x, x_out), dim=-1))
-        x = self.dropout_module(x)
-        x = self.gated_residual(x, residual_graph)
-        x = self.self_attn_layer_norm(x)
-        # END YOUR CODE
-        #residual = x
         if self.normalize_before:
-            x = self.final_layer_norm(x)
-        x = self.activation_fn(self.fc1(x))
-        x = self.activation_dropout_module(x)
-        x = self.fc2(x)
+            x = self.graph_level_norm(x)
+        x = self.phrase_attn(
+            query=x,
+            key=phrase_level,
+            value=phrase_level)
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
-            x = self.final_layer_norm(x)
+            x = self.phrase_level_norm(x)
+        
+        # Last FFN x => x
+        residual = x
+        if self.normalize_before:
+            x = self.ffn_norm(x)
+        x = self.ffn(x)
+        x = self.dropout_module(x)
+        x = self.residual_connection(x, residual)
+        if not self.normalize_before:
+            x = self.ffn_norm(x)
+        # END YOUR CODE
         return x, x_graph, src_labels
 
 

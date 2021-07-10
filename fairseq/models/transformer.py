@@ -382,9 +382,6 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layer_norm = None
         # START YOUR CODE
-        self.is_graph_outside = getattr(args, "is_graph_outside", False)
-        if self.is_graph_outside == True:
-            self.graph_encode = UCCAEncoder(embed_dim, embed_dim, embed_dim, args, layers=6)
         self.label_embedding = nn.Embedding(13, embed_dim)
         nn.init.normal_(self.label_embedding.weight, mean=0, std=embed_dim ** -0.5)
         # END YOUR CODE
